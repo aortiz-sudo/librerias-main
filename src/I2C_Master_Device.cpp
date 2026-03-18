@@ -217,14 +217,14 @@ status I2C_Master_Device::burn_firmware(Stream *p_file, size_t p_file_size)
         vTaskDelay(50 / portTICK_PERIOD_MS);
     }
     
-    // Descomentar si se desea usar verificación CRC
-    /*
+    // Verificación CRC
+    
     uint16_t crc = calculate_firmware_crc(p_file, p_file_size);
     
     uint8_t crc_buffer[3];
     crc_buffer[0] = I2C_CRC_CMD;
-    crc_buffer[1] = (crc >> 8) & 0xFF;
-    crc_buffer[2] = crc & 0xFF;
+    crc_buffer[1] = (crc >> 8) & 0xFF;  // MSB del CRC
+    crc_buffer[2] = crc & 0xFF;     // LSB del CRC
     
     command.type = I2C_CRC_CMD;
     command.data = &crc_buffer[1];
@@ -238,7 +238,44 @@ status I2C_Master_Device::burn_firmware(Stream *p_file, size_t p_file_size)
     }
     
     vTaskDelay(100 / portTICK_PERIOD_MS);
-    */
+    
+    uint8_t error_code = 0xFF;
+    size_t bytes_read = read_data(&error_code, 1);
+
+    if(bytes_read != 1)
+    {
+        logger.logln("No se recibió respuesta de verificación CRC.");
+        return set_status(TIMEOUT_ERROR);
+    }
+
+   switch(error_code)
+{
+    case 0:  // ERROR_NONE
+        logger.logln("CRC verificado correctamente.");
+        break;
+        
+    case 4:  // ERROR_CRC_MISMATCH
+        logger.logln("ERROR CRITICO: CRC no coincide!");
+        logger.logln("El firmware corrupto. Abortando actualizacion.");
+        return set_status(NACK_ERROR);
+        
+    case 1:  // ERROR_INVALID_SIZE
+        logger.logln("ERROR: Tamaño de firmware invalido.");
+        return set_status(DATA_OUT_OF_RANGE_ERROR);
+        
+    case 2:  // ERROR_INVALID_ADDRESS
+        logger.logln("ERROR: Direccion de memoria invalida.");
+        return set_status(DATA_OUT_OF_RANGE_ERROR);
+        
+    case 3:  // ERROR_WRITE_FAILED
+        logger.logln("ERROR: Fallo al escribir en flash.");
+        return set_status(NACK_ERROR);
+        
+    default:
+        logger.log("ERROR DESCONOCIDO: ");
+        logger.logln(error_code);
+        return set_status(NACK_ERROR);
+}
     
     // Enviar comando para iniciar aplicación
     logger.logln("Firmware flasheado exitosamente. Iniciando aplicación...");

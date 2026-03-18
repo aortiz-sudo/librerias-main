@@ -237,7 +237,7 @@ static const char *firmware_update_state_event = "resultadoActualizacionFirmware
 static const char *device_connected_event = "deviceConnected";
 
 /// Token de github
-static char github_token[GITHUB_TOKEN_SIZE] = "";
+static char github_token[GITHUB_TOKEN_SIZE] = "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";
 
 /// Versión actual del firmware ESP32.
 static char current_esp32_fw_v[10] = "";
@@ -257,8 +257,8 @@ static const uint8_t github_param_sizes[] = { GITHUB_TOKEN_SIZE, sizeof(current_
 static const char *firmware_paths[3] = { ESP32_FW_PATH, DISPLAY_FW_PATH, PRINTER_FW_PATH };
 
 /// Endpoint para descargar los archivos de firmware desde Github.
-static const char *branches_endpoint = "/repos/desarrolloidt/librerias/contents";
-static const char *firmwares_endpoints[3] = { "/.pio/build/esp32_debug/firmware.bin", 
+static const char *branches_endpoint = "/repos/aortiz-sudo/firmware_repository/contents";
+static const char *firmwares_endpoints[3] = { "/.pio/build/esp32_release/firmware.bin", 
                                               "/.pio/build/display_release/display.bin", 
                                               "/.pio/build/printer_release/printer.bin" };
 static char api_key[72];
