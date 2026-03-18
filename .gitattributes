@@ -1,0 +1,6 @@
+# Archivos binarios - NO convertir líneas
+*.bin binary
+*.hex binary
+*.elf binary
+*.bin -text
+*.hex -text
