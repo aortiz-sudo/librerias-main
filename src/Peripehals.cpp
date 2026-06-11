@@ -44,10 +44,19 @@ status Peripehals::write_mac_address()
     command.length = length;
 
     status command_status;
+    uint8_t retries = 3;
 
-    while(!this->m_data_received)
+    while(!this->m_data_received && retries--)
     {
         command_status = send_command(&command);
+
+        if(command_status != NO_DEVICE_ERROR)
+        {
+            this->m_printer_connected = 0;
+            return command_status;
+        }
+
+        vTaskDelay(50 / portTICK_PERIOD_MS);
         read_peripehal_data(&this->m_voltage, &this->m_sat_out, &this->m_printer_connected);
     }
 
@@ -61,11 +70,14 @@ status Peripehals::read_peripehal_data(float *p_voltage, uint8_t *p_sat_out, uin
     uint8_t data[7];
     
     if(!(read_data(data, 7) > 0))
+    {
+        *p_printer_connected = 0;
         return get_status();
+    }
 
     *p_voltage = *((float *)&data[0]);
     *p_sat_out = data[4];
-    *p_printer_connected = 1;
+    *p_printer_connected = data[5];
     this->m_data_received = data[6];
 
     return get_status();
@@ -73,6 +85,9 @@ status Peripehals::read_peripehal_data(float *p_voltage, uint8_t *p_sat_out, uin
 
 status Peripehals::printer_write(uint8_t *p_data, size_t p_length)
 {
+    if(this->m_printer_connected == 0)
+        return NACK_ERROR;
+
     command_struct command;
 
     size_t length = p_length + 1;
@@ -91,10 +106,19 @@ status Peripehals::printer_write(uint8_t *p_data, size_t p_length)
     command.length = length;
 
     status command_status;
+    uint8_t retries = 3;
 
-    while(!this->m_data_received)
+    while(!this->m_data_received && retries--)
     {
         command_status = send_command(&command);
+
+        if(command_status != NO_DEVICE_ERROR)
+        {
+            this->m_printer_connected = 0;
+            return command_status;
+        }
+
+        vTaskDelay(50 / portTICK_PERIOD_MS);
         read_peripehal_data(&this->m_voltage, &this->m_sat_out, &this->m_printer_connected);
     }
 
@@ -144,10 +168,19 @@ status Peripehals::reset_printer()
     command.length = 0;
 
     status command_status;
+    uint8_t retries = 3;
 
-    while(!this->m_data_received)
+    while(!this->m_data_received && retries--)
     {
         command_status = send_command(&command);
+
+        if(command_status != NO_DEVICE_ERROR)
+        {
+            this->m_printer_connected = 0;
+            return command_status;
+        }
+
+        vTaskDelay(50 / portTICK_PERIOD_MS);
         read_peripehal_data(&this->m_voltage, &this->m_sat_out, &this->m_printer_connected);
     }
 

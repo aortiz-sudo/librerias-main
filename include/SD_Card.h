@@ -17,6 +17,7 @@
 #define DISPATCHES_PATH                 "/Despachos.txt"           ///< Ruta de los despachos.
 #define GITHUB_PARAMETERS_PATH          "/github.txt"              ///< Ruta para los parametros de github.
 #define API_KEY_PATH                    "/api-key.txt"             ///< Ruta para obtener la api key.
+#define CA_CERT_PATH                    "/ca-cert.pem"             ///< Ruta para el certificado SSL raíz.
 #define USERS_PATH                      "/usuarios.txt"            ///< Ruta para los usuarios.
 #define EVENTS_TMP_PATH                 "/Eventos_tmp.txt"         ///< Ruta temporal de los eventos.
 #define PARAMETERS_BACKUP_PATH          "/backups/Parametros.txt"  ///< Ruta para respaldo de los parametros.
@@ -30,23 +31,31 @@
 #define DISPLAY_FW_PATH                 "/firmwares/display.bin"   ///< Ruta para el firmware del controlador de la pantalla.
 #define PRINTER_FW_PATH                 "/firmwares/printer.bin"   ///< Ruta para el firmware del controlador de la impresora.
 
+/**
+ * \enum    save_type_t
+ * \brief   Tipos de datos que se pueden guardar en la tarjeta SD.
+ */
 typedef enum : uint8_t
 {
-    SAVE_EVENT,
-    SAVE_DISPATCH,
-    SAVE_GENERAL_PARAMETER,
-    SAVE_GITHUB_PARAMETER,
-    SAVE_API_KEY,
-    SAVE_USER,
+    SAVE_EVENT,             ///< Guardar un evento.
+    SAVE_DISPATCH,          ///< Guardar un despacho.
+    SAVE_GENERAL_PARAMETER, ///< Guardar un parámetro general.
+    SAVE_GITHUB_PARAMETER,  ///< Guardar un parámetro de GitHub.
+    SAVE_API_KEY,           ///< Guardar la API key.
+    SAVE_USER,              ///< Guardar un usuario.
 } save_type_t;
 
+/**
+ * \struct  sd_info_struct
+ * \brief   Estructura con la información necesaria para una operación de guardado en la SD.
+ */
 struct sd_info_struct
 {
-    save_type_t save_type;
-    uint8_t position;
-    bool delete_info;
-    char path[32];
-    char data[256];
+    save_type_t save_type;  ///< Tipo de dato a guardar.
+    uint8_t position;       ///< Posición del dato dentro del archivo.
+    bool delete_info;       ///< Indica si se debe eliminar el contenido previo.
+    char path[32];          ///< Ruta del archivo destino.
+    char data[256];         ///< Datos a guardar.
 };
 
 /**

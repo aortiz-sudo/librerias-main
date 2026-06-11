@@ -4,22 +4,37 @@ status Display::send_command(command_struct *p_command)
 {
     uint8_t data_length = ((get_crc_type() != NO_CRC) ? (p_command->length + 2) : p_command->length) + 4;
 
-    uint8_t data[DISPLAY_BUFFER_LEN] = 
-    { 
+    if(data_length > DISPLAY_BUFFER_LEN)
+        data_length = DISPLAY_BUFFER_LEN;
+
+    uint8_t data[DISPLAY_BUFFER_LEN] =
+    {
         FRAME_HEADER_H, FRAME_HEADER_L, (uint8_t)(data_length - 3), p_command->type
     };
 
     for(int i = 4; i < data_length; i++)
-    {
         data[i] = p_command->data[i - 4];
-
-        if(i > DISPLAY_BUFFER_LEN)
-            break;
-    }
 
     write_data(data, data_length);
 
-    p_command->response_length = read_data(p_command->response, p_command->buffer_len);
+    // Leer respuesta tanto para lectura (0x83) como escritura (0x82 → ACK "OK").
+    // Para escritura el ACK del DWIN es exactamente 6 bytes (5A A5 03 82 4F 4B);
+    // pedir más bytes hace que readBytes() espere el inter-byte timeout completo
+    // (~1s por write) esperando datos que nunca llegan.
+    size_t expected_len = (p_command->type == WRITE_COMMAND) ? 6 : p_command->buffer_len;
+    if(expected_len > p_command->buffer_len)
+        expected_len = p_command->buffer_len;
+
+    p_command->response_length = read_data(p_command->response, expected_len);
+
+    // Para escritura, verificar ACK: 5A A5 03 82 4F 4B
+    if(p_command->type == WRITE_COMMAND && p_command->response_length >= 6)
+    {
+        if(p_command->response[3] == 0x82
+            && p_command->response[4] == 0x4F
+            && p_command->response[5] == 0x4B)
+            return NO_DEVICE_ERROR; // ACK OK
+    }
 
     return get_status();
 }
@@ -259,22 +274,24 @@ status Display::simulate_touch(uint16_t p_x, uint16_t p_y, press_mode p_press_mo
 
 status Display::set_user_variable(uint16_t p_address, uint8_t *p_value, size_t p_value_length)
 {
-    uint8_t data[DISPLAY_BUFFER_LEN] = 
+    uint8_t data[DISPLAY_BUFFER_LEN] =
     {
         (uint8_t)(p_address >> 8), (uint8_t)(p_address & 0xFF)
     };
 
-    for(size_t i = 2; i < p_value_length + 2; i++)
-    {
-        data[i] = p_value[i - 2];
+    // Limitar a lo que cabe tras los 4 bytes de header (5A A5 LEN CMD) que añade send_command.
+    if(p_value_length > DISPLAY_BUFFER_LEN - 6)
+        p_value_length = DISPLAY_BUFFER_LEN - 6;
 
-        if(i >= DISPLAY_BUFFER_LEN - 4)
-            break;
-    }
+    for(size_t i = 0; i < p_value_length; i++)
+        data[i + 2] = p_value[i];
 
     command_struct command;
     command.data = data;
-    command.length = sizeof(data);
+    // Longitud real: 2 bytes de dirección + N bytes de valor.
+    // Antes se usaba sizeof(data)=DISPLAY_BUFFER_LEN, lo que enviaba ~58 bytes
+    // de relleno cero al DWIN y sobrescribía VPs adyacentes con 0.
+    command.length = 2 + p_value_length;
     command.response = this->m_buffer;
     command.buffer_len = DISPLAY_BUFFER_LEN;
     command.type = WRITE_COMMAND;

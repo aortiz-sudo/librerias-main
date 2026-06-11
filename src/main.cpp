@@ -53,7 +53,9 @@ static QueueHandle_t SD_Read_Flag_Queue;
 static SemaphoreHandle_t screen_mutex;
 /// Mutex para acceso concurrente al cliente HTTP.
 static SemaphoreHandle_t http_mutex;
-///
+/// Mutex para acceso concurrente al bus I2C (Wire).
+SemaphoreHandle_t i2c_mutex;
+/// Grupo de eventos para suspender tareas.
 static EventGroupHandle_t suspend_task_group;
 
 //========================= Variables de Configuración =========================//
@@ -146,8 +148,16 @@ static bool low_battery_event_flag = false;
 static bool open_cabinet_event_flag = false;
 /// Bandera para enviar evento de impresora desconectada.
 static bool printer_disconnected_event_flag = false;
-/// 
+/// Bandera para enviar evento de lector RFID desconectado.
+static bool rfid_disconnected_event_flag = false;
+///
 bool printing = false;
+/// Bandera para diferir la impresión fuera del callback I2C.
+static bool pending_print = false;
+/// Datos del despacho pendiente de imprimir.
+static char pending_print_data[160] = "";
+/// Tipo de impresión pendiente (0 = último ticket, 1 = reimpresión, 2 = ticket del día).
+static int pending_print_args = 0;
 
 #ifndef debug_mode  
   /// Punteros a los datos del RTC para el logger.
@@ -237,7 +247,7 @@ static const char *firmware_update_state_event = "resultadoActualizacionFirmware
 static const char *device_connected_event = "deviceConnected";
 
 /// Token de github
-static char github_token[GITHUB_TOKEN_SIZE] = "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";
+static char github_token[GITHUB_TOKEN_SIZE] = "";
 
 /// Versión actual del firmware ESP32.
 static char current_esp32_fw_v[10] = "";
@@ -262,6 +272,7 @@ static const char *firmwares_endpoints[3] = { "/.pio/build/esp32_release/firmwar
                                               "/.pio/build/display_release/display.bin", 
                                               "/.pio/build/printer_release/printer.bin" };
 static char api_key[72];
+static char ca_cert[CA_CERT_SIZE] = { 0 };
 static char data_endpoint[32] = "/api/data/";
 static char product_endpoint[32] = "/api/productos";
 static char tag_endpoint[32] = "/api/tag";
@@ -276,74 +287,142 @@ static user_json_struct users[MAX_NUMBER_OF_USERS] = {};
  
 //========================= Prototipos de Funciones =========================//
 
+/** @brief Callback del estado inicial de la pantalla. @param p_info Datos del estado. @param args Argumentos adicionales. */
 void initial(uint8_t *p_info, int args);
+/** @brief Valida la contraseña ingresada en el estado de inicio de sesión. @param p_password Datos con la contraseña. @param args Argumentos adicionales. */
 void check_password(uint8_t *p_password, int args);
+/** @brief Imprime el último ticket (callback del menú de reimpresión). @param p_last_ticket Datos del ticket. @param args Argumentos adicionales. */
 void print_ticket(uint8_t *p_last_ticket, int args);
+/** @brief Ejecuta la impresión del ticket actual. */
+void execute_print_ticket();
+/** @brief Procesa los datos de calibración del caudalímetro. @param p_calibration_data Datos de calibración. @param args Argumentos adicionales. */
 void calibrate(uint8_t *p_calibration_data, int args);
+/** @brief Maneja el despacho de combustible. @param p_disptached_volume Volumen despachado. @param args Argumentos adicionales. */
 void dispatch(uint8_t *p_disptached_volume, int args);
+/** @brief Actualiza la fecha y hora a partir de la entrada del usuario. @param p_rtc_info Datos de fecha y hora. @param args Argumentos adicionales. */
 void rtc_info(uint8_t *p_rtc_info, int args);
+/** @brief Actualiza el precio del producto. @param p_price_info Datos del precio. @param args Argumentos adicionales. */
 void price_info(uint8_t *p_price_info, int args);
+/** @brief Configura/muestra la información del negocio en el ticket. @param p_business_info Datos del negocio. @param args Argumentos adicionales. */
 void show_ticket_info(uint8_t *p_business_info, int args);
+/** @brief Ajusta el brillo de la pantalla. @param p_brightness Valor de brillo. @param args Argumentos adicionales. */
 void brightness_info(uint8_t *p_brightness, int args);
 
+/** @brief Obtiene y formatea la dirección MAC del módulo Bluetooth de la impresora. @param p_mac_address Cadena con la dirección MAC. */
 void get_mac_address(const char *p_mac_address);
+/** @brief Procesa la tecla presionada y actualiza el estado de la pantalla. @param p_key Tecla presionada. */
 void manage_screen(char p_key);
+/** @brief Muestra en pantalla las variables actuales del sistema. */
 void show_variables();
+/** @brief Actualiza la fecha y hora mostradas en la pantalla. @param p_display_write true para escribir en la pantalla. */
 void update_display_rtc(bool p_display_write = true);
+/** @brief Carga los parámetros generales desde la tarjeta SD. */
 void config_parameters();
+/** @brief Carga los usuarios registrados desde la tarjeta SD. */
 void config_users();
+/** @brief Lee la API key desde la tarjeta SD. */
 void read_api_key();
+/** @brief Lee el certificado SSL raíz (CA) desde la tarjeta SD. */
+void read_ca_cert();
+/** @brief Carga los parámetros de GitHub (token y versiones de firmware) desde la SD. */
 void config_github();
+/** @brief Lee y escribe el estado de las entradas y salidas del sistema. */
 void read_write_ios();
+/** @brief Controla el estado de los relevadores. @param p_relay_states Arreglo con el estado de cada relevador. */
 void relay_control(uint8_t p_relay_states[3]);
+/** @brief Verifica si se solicitó un reinicio del sistema. */
 void check_reset();
+/** @brief Verifica el estado de conexión de la impresora. */
 void check_printer();
+/** @brief Obtiene los datos del sensor de nivel de combustible (LLS). */
 void get_lls_data();
+/** @brief Obtiene los datos del lector RFID. */
 void get_rfid_data();
+/** @brief Construye la estructura de información para guardar datos en la SD. @param p_path Ruta del archivo. @param p_data Datos a guardar. @param p_save_type Tipo de guardado. @param p_pos Posición del dato. @param p_delete Indica si se elimina el contenido previo. */
 void build_sd_info(const char *p_path, const char *p_data, save_type_t p_save_type, uint8_t p_pos = 0, bool p_delete = false);
+/** @brief Guarda en la tarjeta SD los datos pendientes en la cola. */
 void save_to_sd();
+/** @brief Envía un evento al servidor. @param p_json Estructura con la información del evento. @return true si se envió correctamente. */
 bool send_data(json_event_struct *p_json);
+/** @brief Envía una cadena JSON de evento al servidor. @param p_json Cadena JSON a enviar. @return true si se envió correctamente. */
 bool send_data(const char *p_json);
+/** @brief Envía una actualización al servidor. @param p_json Estructura con la información de la actualización. @return true si se envió correctamente. */
 bool update_data(json_update_struct *p_json);
+/** @brief Envía una actualización JSON a un endpoint específico. @param p_json Cadena JSON a enviar. @param p_endpoint Endpoint destino. @return true si se envió correctamente. */
 bool update_data(const char *p_json, const char *p_endpoint);
+/** @brief Genera y encola un evento del sistema. @param p_event Tipo de evento. @param p_use_password Indica si se incluye la contraseña. @param p_quantity Cantidad asociada al evento. @param p_use_tag Indica si se incluye el tag RFID. */
 void trigger_event(json_event p_event, bool p_use_password = false, float p_quantity = 0, bool p_use_tag = false);
+/** @brief Genera y encola una actualización del sistema. @param p_update Tipo de actualización. @param p_price Nuevo precio. @param p_product Producto asociado. @param p_id Identificador de la entidad. */
 void trigger_update(json_update p_update, const char *p_price, const char *p_product, uint32_t p_id);
+/** @brief Revisa y procesa la cola de eventos. */
 void check_events();
+/** @brief Revisa y procesa la cola de actualizaciones. */
 void check_updates();
+/** @brief Envía los eventos pendientes guardados en la tarjeta SD. */
 void send_last_events();
+/** @brief Gestiona la generación y envío de eventos del sistema. */
 void events();
+/** @brief Obtiene la lista de usuarios desde el servidor. */
 void get_users();
+/** @brief Procesa el JSON de usuarios recibido del servidor. @param p_json Cadena JSON. @param p_token Tokens del JSON. @param p_token_size Número de tokens. @param p_index Índice de inicio. */
 void parse_users(const char *p_json, jsmntok_t *p_token, int p_token_size, int p_index);
+/** @brief Construye la cadena con la información de un despacho. @param p_dispatch_str Buffer destino. @param p_liters Litros despachados. */
 void build_dispatch_string(char p_dispatch_str[160], float p_liters);
+/** @brief Revisa los despachos guardados en la tarjeta SD. @param init Indica si es la inicialización. */
 void check_dispatches(bool init = false);
+/** @brief Copia un archivo a su ubicación de respaldo. @param p_main_path Ruta del archivo original. @param p_backup_path Ruta del respaldo. */
 void copy_backup(const char *p_main_path, const char *p_backup_path);
+/** @brief Construye la estructura de un ticket a partir de la cadena de despacho. @param p_ticket Estructura de ticket destino. @param p_dispatch_str Cadena con los datos del despacho. @param p_rtc Datos de fecha y hora. */
 void build_ticket(ticket_struct *p_ticket, const char *p_dispatch_str, uint8_t *p_rtc);
+/** @brief Configura los pines de entrada/salida del sistema. */
 void config_io_pins();
+/** @brief Configura el logger del sistema. */
 void config_logger();
+/** @brief Configura la conexión Ethernet. */
 void config_ethernet();
+/** @brief Verifica el enlace físico de Ethernet. @return true si el enlace está activo. */
+bool check_ethernet_link();
+/** @brief Crea e inicializa las tareas de FreeRTOS. */
 void config_tasks();
+/** @brief Lee y procesa el core dump almacenado tras un reinicio inesperado. */
 void read_core_dump();
+/** @brief Verifica si hay actualizaciones de firmware disponibles. */
 void check_firmware_updates();
+/** @brief Revisa los disparadores de actualización de firmware. */
 void check_firmware_triggers();
+/** @brief Descarga un firmware desde un endpoint y lo guarda en un archivo. @param p_file Archivo destino. @param p_endpoint Endpoint de descarga. @return true si la descarga fue exitosa. */
 bool download_firmware(File *p_file, const char *p_endpoint);
+/** @brief Actualiza el firmware de la ESP32. @param p_file Archivo del firmware. @param p_file_size Tamaño del archivo. @return true si la actualización fue exitosa. */
 bool update_esp32(File *p_file, size_t p_file_size);
+/** @brief Quema un firmware a un dispositivo I2C (pantalla o impresora). @param device Dispositivo I2C destino. @param p_path Ruta del archivo de firmware. @return true si la operación fue exitosa. */
 bool burn_firmware(I2C_Master_Device *device, const char *p_path);
+/** @brief Informa al servidor el estado de la actualización de firmware. @param p_state Estado de la actualización. */
 void send_update_state(bool p_state);
 
 /* ========================= Funciones callback para eventos de Socket IO  =========================*/
 
+/** @brief Callback de Socket.IO para actualizar un usuario. @param p_payload Carga útil con los datos del usuario. */
 void update_user(const char *p_payload);
+/** @brief Callback de Socket.IO para actualizar un producto. @param p_payload Carga útil con los datos del producto. */
 void update_product(const char *p_payload);
+/** @brief Callback de Socket.IO para actualizar el firmware. @param p_payload Carga útil con la información del firmware. */
 void update_firmware(const char *p_payload);
+/** @brief Callback de Socket.IO ejecutado cuando el dispositivo se conecta. @param payload Carga útil del evento de conexión. */
 void device_connected(const char *payload);
 
 /* ========================= Funciones constructoras  =========================*/
 
+/** @brief Construye y configura el dispositivo LLS. @param p_builder Constructor del dispositivo. @return Puntero al dispositivo construido. */
 Device *build_lls_device(Device_Builder *p_builder);
+/** @brief Construye y configura el dispositivo de pantalla. @param p_builder Constructor del dispositivo. @return Puntero al dispositivo construido. */
 Device *build_screen_device(Device_Builder *p_builder);
+/** @brief Construye y configura el lector RFID MT124. @param p_builder Constructor del dispositivo. @return Puntero al dispositivo construido. */
 Device *build_mt124_device(Device_Builder *p_builder);
+/** @brief Construye y configura el dispositivo de periféricos (impresora). @param p_builder Constructor del dispositivo. @return Puntero al dispositivo construido. */
 Device *build_peripehals_device(Device_Builder *p_builder);
+/** @brief Construye y configura el cliente HTTP. @param p_builder Constructor del cliente. @return Puntero al cliente construido. */
 Global_Client *build_http_client(Global_Client_Builder *p_builder);
+/** @brief Construye y configura el cliente Socket.IO. @param p_builder Constructor del cliente. @return Puntero al cliente construido. */
 Global_Client *build_socketio_client(Global_Client_Builder *p_builder);
 
 //========================= Arreglo de Funciones de Estado =========================//
@@ -388,6 +467,10 @@ void IRAM_ATTR isr_flowmeter_pin_2()
     flow_counter++;
 }*/
 
+/**
+ * @brief Tarea general del sistema: gestiona sensores, periféricos, eventos y E/S.
+ * @param pvParameters Parámetros de la tarea (no utilizados).
+ */
 void General_Task(void *pvParameters)
 {
   pinMode(FLOWMETER_PIN_1, INPUT);
@@ -433,6 +516,10 @@ void General_Task(void *pvParameters)
   }
 }
 
+/**
+ * @brief Tarea encargada de la comunicación HTTP con el servidor.
+ * @param pvParameters Parámetros de la tarea (no utilizados).
+ */
 void HTTP_Task(void *pvParameters)
 {
   Global_Client_Builder http_builder;
@@ -447,6 +534,9 @@ void HTTP_Task(void *pvParameters)
   logger.logln(data_endpoint);
 
   http_client = (Ethernet_HTTP *)build_http_client(&http_builder);
+
+  if(ca_cert[0] != '\0')
+    http_client->set_certificate(ca_cert);
 
   unsigned long last_millis = 0;
   unsigned long last_request_user_millis = 0;
@@ -477,8 +567,9 @@ void HTTP_Task(void *pvParameters)
 
     if(current_millis - last_millis > 60000)
     {
-      if(!ethernet_begin)
-        ethernet_begin = Ethernet.begin(ethernet_mac_address);
+      xSemaphoreTake(http_mutex, portMAX_DELAY);
+      check_ethernet_link();
+      xSemaphoreGive(http_mutex);
 
       send_last_events();
 
@@ -492,6 +583,10 @@ void HTTP_Task(void *pvParameters)
   }
 }
 
+/**
+ * @brief Tarea encargada de la comunicación WebSocket/Socket.IO con el servidor.
+ * @param pvParameters Parámetros de la tarea (no utilizados).
+ */
 void Websocket_Task(void *pvParameters)
 {
   Global_Client_Builder websocket_builder;
@@ -503,8 +598,14 @@ void Websocket_Task(void *pvParameters)
   websocket_client->set_identifer(websocket_identifier, device_name);
   int device_namespace_index = websocket_client->set_namespace(socket_io_device_namespace);
   
+  while(!ethernet_begin) { vTaskDelay(1000 / portTICK_PERIOD_MS); }
+
+  xSemaphoreTake(http_mutex, portMAX_DELAY);
   if(websocket_client->start_websocket_client())
     websocket_client->connect_to_namespace(device_namespace_index);
+  xSemaphoreGive(http_mutex);
+
+  unsigned long last_reconnect_millis = 0;
 
   while(true)
   {
@@ -518,12 +619,32 @@ void Websocket_Task(void *pvParameters)
       vTaskSuspend(NULL);
     }
 
+    if(!ethernet_begin)
+    {
+      unsigned long current_millis = millis();
+      if(current_millis - last_reconnect_millis > 60000)
+      {
+        xSemaphoreTake(http_mutex, portMAX_DELAY);
+        check_ethernet_link();
+        xSemaphoreGive(http_mutex);
+        last_reconnect_millis = current_millis;
+      }
+      vTaskDelay(1000 / portTICK_PERIOD_MS);
+      continue;
+    }
+
+    xSemaphoreTake(http_mutex, portMAX_DELAY);
     websocket_client->handle_message();
- 
+    xSemaphoreGive(http_mutex);
+
     vTaskDelay(100 / portTICK_PERIOD_MS);
   }
 }
 
+/**
+ * @brief Tarea encargada de gestionar la pantalla y la interacción con el teclado.
+ * @param pvParameters Parámetros de la tarea (no utilizados).
+ */
 void Screen_Task(void *pvParameters)
 {
   xSemaphoreTake(screen_mutex, portMAX_DELAY);
@@ -568,16 +689,34 @@ void Screen_Task(void *pvParameters)
   while(true)
   {
     char key = keypad.getKey();
-    update_display_rtc();
+
+    static unsigned long last_rtc_update = 0;
+    unsigned long now = millis();
+    if(now - last_rtc_update >= 500)
+    {
+      update_display_rtc();
+      last_rtc_update = now;
+    }
+
     manage_screen(key);
+
+    if(pending_print)
+    {
+      pending_print = false;
+      execute_print_ticket();
+    }
 
     vTaskDelay(10 / portTICK_PERIOD_MS);
   }
 }
 
-void setup() 
+/**
+ * @brief Función de configuración inicial de Arduino. Inicializa hardware, parámetros y tareas.
+ */
+void setup()
 {
   config_io_pins();
+  //Wire.setBufferSize(256);
   Wire.begin(SDA_PIN, SCL_PIN);
   SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
 
@@ -588,6 +727,7 @@ void setup()
   config_parameters();
   config_users();
   read_api_key();
+  read_ca_cert();
   config_github();
 
   for(int i = 0; i < 128; i++)
@@ -609,13 +749,16 @@ void setup()
 
 
 
-  config_tasks();
   read_core_dump();
+  config_tasks();
 
   vTaskDelete(NULL);
 }
 
-void loop() 
+/**
+ * @brief Bucle principal de Arduino. La lógica se ejecuta en las tareas de FreeRTOS.
+ */
+void loop()
 {
   vTaskDelay(10 / portTICK_PERIOD_MS);
 }
@@ -691,18 +834,41 @@ void check_password(uint8_t *p_password, int args)
  */
 void print_ticket(uint8_t *p_data, int args)
 {
+  if(args == 0 && p_data)
+  {
+    strncpy(pending_print_data, (const char *)p_data, sizeof(pending_print_data) - 1);
+    pending_print_data[sizeof(pending_print_data) - 1] = '\0';
+  }
+
+  pending_print_args = args;
+  pending_print = true;
+}
+
+void execute_print_ticket()
+{
+  logger.log("printer_connected: ");
+  logger.logln(printer_connected);
+
+  if(printer_connected == 0)
+  {
+    logger.logln("Impresora no conectada, omitiendo impresion.");
+    return;
+  }
+
+  int args = pending_print_args;
+
   if(args == 0 || args == 1)
   {
     char last_dispatch[128] = "";
 
     bool print_continue = true;
     if(args == 0)
-      strncpy(last_dispatch, (const char *)p_data, sizeof(last_dispatch));
+      strncpy(last_dispatch, pending_print_data, sizeof(last_dispatch));
     else if(args == 1)
       print_continue = get_last_dispatch(last_dispatch);
 
     last_dispatch[sizeof(last_dispatch) - 1] = '\0';
- 
+
     if(print_continue == 1)
     {
       logger.logln("Imprimiendo ultimo ticket...");
@@ -712,7 +878,7 @@ void print_ticket(uint8_t *p_data, int args)
       logger.logln(last_dispatch);
 
       build_ticket(&ticket, last_dispatch, rtc_array);
-      
+
       printing = true;
       printer->print_last_ticket(&ticket);
       printing = false;
@@ -734,14 +900,14 @@ void print_ticket(uint8_t *p_data, int args)
     }
 
     logger.logln("Imprimiendo ticket del dia...");
-    
+
     if(lines > 0)
     {
       char date[16];
       snprintf(date, sizeof(date), "%u;%u;%u", rtc_data[RTC_YEAR_INDEX], rtc_data[RTC_MONTH_INDEX], rtc_data[RTC_DAY_INDEX]);
-      
+
       date[sizeof(date) - 1] = '\0';
-      
+
       if(!get_dispatches(dispatches, lines))
       {
         logger.logln("No se pudieron leer los despachos.");
@@ -764,7 +930,7 @@ void print_ticket(uint8_t *p_data, int args)
           if(string_contains(dispatches[i], date))
             build_ticket(&tickets[ticket_counter++], dispatches[i], rtc_data);
         }
-        
+
         printing = true;
         printer->print_day_ticket(tickets, counter);
         printing = false;
@@ -988,13 +1154,17 @@ void show_ticket_info(uint8_t *p_business_info, int args)
       logger.log(i + 1);
       logger.log(". ");
       logger.logln(display_ticket_info[i]);
+      vTaskDelay(20 / portTICK_PERIOD_MS);
     }
   }
   else if(args == 2)
   {
     const char *text = "                                       ";
     for(int i = 0; i < 6; i++)
+    {
       display_status = screen->write_to_address(display_ticket_info_addresses[i], (uint8_t *)text, strlen(text));
+      vTaskDelay(20 / portTICK_PERIOD_MS);
+    }
   }
 }
 
@@ -1056,20 +1226,87 @@ void manage_screen(char p_key)
 {
   unsigned long current_millis = millis();
   static unsigned long last_millis = 0;
-
-  if(p_key)
-    last_millis = current_millis;
+  static uint8_t lock_dim_level = 0;
+  static bool busy_dimmed = false;
 
   screen_state current_screen_state = screen->get_screen_state();
-    
-  if(current_millis - last_millis > 300000 && !(current_screen_state != DISPATCH_SCREEN_STATE || current_screen_state != CALIBRATION_SCREEN_STATE) && current_screen_state != INITIAL_SCREEN_STATE)
+  bool in_lock = (current_screen_state == INITIAL_SCREEN_STATE);
+  bool in_busy = (current_screen_state == DISPATCH_SCREEN_STATE
+                  || current_screen_state == CALIBRATION_SCREEN_STATE);
+
+  if(p_key)
+  {
+    last_millis = current_millis;
+
+    if(in_lock && lock_dim_level != 0)
+    {
+      screen->set_brightness(screen->get_brightness(), false);
+      lock_dim_level = 0;
+    }
+
+    if(in_busy && busy_dimmed)
+    {
+      screen->set_brightness(screen->get_brightness(), false);
+      busy_dimmed = false;
+    }
+  }
+
+  if(!in_lock
+     && current_screen_state != DISPATCH_SCREEN_STATE
+     && current_screen_state != CALIBRATION_SCREEN_STATE
+     && current_millis - last_millis > 300000UL)
   {
     screen->set_transition(true, INITIAL_SCREEN_STATE);
     last_millis = current_millis;
+    lock_dim_level = 0;
+  }
+
+  if(in_lock)
+  {
+    unsigned long lock_elapsed = current_millis - last_millis;
+
+    if(lock_dim_level == 0 && lock_elapsed > 60000UL)
+    {
+      screen->set_brightness(10, false);
+      lock_dim_level = 1;
+    }
+    else if(lock_dim_level == 1 && lock_elapsed > 300000UL)
+    {
+      screen->set_brightness(0, false);
+      lock_dim_level = 2;
+    }
+  }
+  else if(lock_dim_level != 0)
+  {
+    screen->set_brightness(screen->get_brightness(), false);
+    lock_dim_level = 0;
+  }
+
+  if(in_busy)
+  {
+    if(!busy_dimmed
+       && current_millis - last_millis > 120000UL
+       && screen->get_brightness() > 20)
+    {
+      screen->set_brightness(20, false);
+      busy_dimmed = true;
+    }
+  }
+  else if(busy_dimmed)
+  {
+    screen->set_brightness(screen->get_brightness(), false);
+    busy_dimmed = false;
   }
 
   printer_status = printer->read_peripehal_data(&voltage, &sat_out, &printer_connected);
-  show_variables();
+
+  static unsigned long last_variables_update = 0;
+  unsigned long vars_now = millis();
+  if(vars_now - last_variables_update >= 500)
+  {
+    show_variables();
+    last_variables_update = vars_now;
+  }
 
   if(current_screen_state == INITIAL_SCREEN_STATE)
     check_firmware_triggers();
@@ -1250,8 +1487,37 @@ void read_api_key()
 }
 
 /**
- * 
- * 
+ * @brief Lee el certificado SSL raíz desde la tarjeta SD.
+ */
+void read_ca_cert()
+{
+  File cert_file = SD.open(CA_CERT_PATH, FILE_READ);
+
+  if(!cert_file)
+  {
+    logger.logln("No se encontro el certificado SSL en la SD.");
+    return;
+  }
+
+  size_t file_size = cert_file.size();
+
+  if(file_size == 0 || file_size >= CA_CERT_SIZE)
+  {
+    logger.logln("Certificado SSL invalido o excede el buffer.");
+    cert_file.close();
+    return;
+  }
+
+  cert_file.readBytes(ca_cert, file_size);
+  ca_cert[file_size] = '\0';
+  cert_file.close();
+
+  logger.logln("Certificado SSL cargado desde SD.");
+}
+
+/**
+ *
+ *
  */
 void config_github()
 {
@@ -1405,6 +1671,7 @@ void get_rfid_data()
       screen->set_tag_detected(true);
 
       rfid_read = true;
+      rfid_disconnected_event_flag = false;  // Reiniciar bandera de desconexión al leer una etiqueta exitosamente
 
       uint32_t int_tag = (tag_data[0] << 16) | (tag_data[1] << 8) | tag_data[2];
       snprintf(str_tag, sizeof(str_tag), "\"%010u\"", int_tag);
@@ -1414,8 +1681,11 @@ void get_rfid_data()
       logger.log("Tag: ");
       logger.logln(str_tag);
     }
-    else if(rfid_status == MT124::TIMEOUT_ERROR)
+    else if(rfid_status == MT124::TIMEOUT_ERROR && !rfid_disconnected_event_flag)
+    {
       trigger_event(RFID_READER_DISCONNECTED);
+      rfid_disconnected_event_flag = true;
+    }
 
     last_millis = current_millis;
   }
@@ -1677,6 +1947,16 @@ void check_events()
 {
   json_event_struct json_struct;
 
+  if(!ethernet_begin)
+  {
+    if(uxQueueSpacesAvailable(Event_Queue) == 0)
+    {
+      if(xQueueReceive(Event_Queue, (void *)&json_struct, 0) == pdTRUE)
+        send_data(&json_struct);
+    }
+    return;
+  }
+
   if(xQueueReceive(Event_Queue, (void *)&json_struct, 0) == pdTRUE)
     send_data(&json_struct);
 }
@@ -1684,6 +1964,9 @@ void check_events()
 void check_updates()
 {
   json_update_struct json_struct;
+
+  if(!ethernet_begin)
+    return;
 
   if(xQueueReceive(Update_Queue, (void *)&json_struct, 0) == pdTRUE)
     update_data(&json_struct);  
@@ -1698,6 +1981,9 @@ void check_updates()
  */
 void send_last_events()
 {
+  if(!ethernet_begin)
+    return;
+
   size_t n_events = 0;
   char events[10][MAX_EVENT_JSON_LENGTH] = { 0 };
 
@@ -1739,7 +2025,9 @@ void send_last_events()
     
     logger.logln(json);
     
+    xSemaphoreTake(http_mutex, portMAX_DELAY);
     bool state = send_data(json);
+    xSemaphoreGive(http_mutex);
     http_client->flush_headers();
 
     if(!state)
@@ -1792,11 +2080,11 @@ void events()
     printer_disconnected_event_flag = false;
 }
 
-/**
- * 
- */
 void get_users()
 {
+  if(!ethernet_begin)
+    return;
+
   logger.logln("Obteniendo usuarios...");
   uint8_t data[2400];
   memset(data, 0x00, sizeof(data));
@@ -1814,8 +2102,10 @@ void get_users()
 
   const char *json = nullptr;
 
+  xSemaphoreTake(http_mutex, portMAX_DELAY);
   if(http_client->get_data_from_server(data, sizeof(data)) > 0)
     json = (const char *)&data[0];
+  xSemaphoreGive(http_mutex);
 
   http_client->flush_headers();
 
@@ -2133,8 +2423,13 @@ void config_logger()
  */
 void config_ethernet()
 {
-  //esp_netif_init();
   Ethernet.init(CS_W5500);
+
+  if(Ethernet.linkStatus() != LinkON)
+  {
+    logger.logln("Cable Ethernet no detectado.");
+    return;
+  }
 
   if((ethernet_begin = Ethernet.begin(ethernet_mac_address)) == 0)
   {
@@ -2155,8 +2450,45 @@ void config_ethernet()
 }
 
 /**
+ * @brief Verifica el estado del enlace Ethernet y reinicia DHCP si es necesario.
+ *
+ * Verifica si hay cable conectado fisicamente al modulo W5500. Si hay enlace
+ * pero no hay IP asignada, intenta obtener una por DHCP.
+ *
+ * @return true  Si hay enlace fisico y DHCP configurado.
+ * @return false Si no hay cable o DHCP fallo.
+ */
+bool check_ethernet_link()
+{
+  if(Ethernet.linkStatus() != LinkON)
+  {
+    if(ethernet_begin)
+      logger.logln("Cable Ethernet desconectado.");
+
+    ethernet_begin = false;
+    return false;
+  }
+
+  if(!ethernet_begin)
+  {
+    logger.logln("Cable Ethernet detectado. Configurando DHCP...");
+    ethernet_begin = Ethernet.begin(ethernet_mac_address) != 0;
+
+    if(ethernet_begin)
+    {
+      logger.log("IP asignada: ");
+      logger.logln(Ethernet.localIP());
+    }
+    else
+      logger.logln("No se pudo configurar DHCP.");
+  }
+
+  return ethernet_begin;
+}
+
+/**
  * @brief Configura las tareas del sistema.
- * 
+ *
  * Esta función se encarga de crear y configurar las tareas que serán ejecutadas en
  * paralelo por el sistema, asignando los recursos y prioridades necesarias para su
  * correcto funcionamiento.
@@ -2165,6 +2497,7 @@ void config_tasks()
 {
   http_mutex = xSemaphoreCreateMutex();
   screen_mutex = xSemaphoreCreateMutex();
+  i2c_mutex = xSemaphoreCreateMutex();
 
   Relay_Queue = xQueueCreate(5, 3);
   Event_Queue = xQueueCreate(10, sizeof(json_event_struct));
@@ -2427,8 +2760,7 @@ void read_core_dump()
 
   uint8_t *ptr = (uint8_t *)data + 20;
   size_t counter = size - 20;
-  while(counter--)
-    coredump_file.write(*ptr++);
+  coredump_file.write(ptr, counter);
 
   coredump_file.close();
   logger.logln("Core dump guardado en la tarjeta SD.");
@@ -2491,7 +2823,7 @@ void check_firmware_updates()
   {
     logger.logln(versions[i]);
 
-    if(strcmp((const char *)versions[i], github_parameters[i + 1]) != 0)
+    if(strcmp((const char *)versions[i], github_parameters[i + 1]) == 0)
     {
       logger.logln("No hay nueva version de firmware disponible.");
       continue;
@@ -2535,18 +2867,48 @@ void check_firmware_updates()
 
 void check_firmware_triggers()
 {
-  if(trigger_fw_update[1])
+  /*if(trigger_fw_update[1])
   {
-    //logger.logln("Nuevo firmware encontrado para el controlador del display!");
-    //burn_firmware(screen, DISPLAY_FW_PATH);
+    logger.logln("Nuevo firmware encontrado para el controlador del display!");
+
+    // Suspender tareas que usan I2C durante el flasheo
+    xEventGroupSetBits(suspend_task_group, TRIGGER_BIT);
+    xEventGroupWaitBits(suspend_task_group,
+        GENERAL_TASK_BIT | WS_TASK_BIT | HTTP_TASK_BIT,
+        pdFALSE, pdTRUE, pdMS_TO_TICKS(5000));
+
+    bool result = burn_firmware(screen, DISPLAY_FW_PATH);
+    logger.log("Resultado display OTA: ");
+    logger.logln(result ? "OK" : "FALLO");
+
+    // Reanudar tareas
+    xEventGroupClearBits(suspend_task_group,
+        TRIGGER_BIT | GENERAL_TASK_BIT | WS_TASK_BIT | HTTP_TASK_BIT);
+    vTaskResume(General_Task_Handle);
+    vTaskResume(HTTP_Task_Handle);
+    vTaskResume(Websocket_Task_Handle);
 
     trigger_fw_update[1] = false;
   }
 
   if(trigger_fw_update[2])
   {
-    //logger.logln("Nuevo firmware encontrado para el controlador de la impresora!");
-    //burn_firmware(printer, PRINTER_FW_PATH);
+    logger.logln("Nuevo firmware encontrado para el controlador de la impresora!");
+
+    xEventGroupSetBits(suspend_task_group, TRIGGER_BIT);
+    xEventGroupWaitBits(suspend_task_group,
+        GENERAL_TASK_BIT | WS_TASK_BIT | HTTP_TASK_BIT,
+        pdFALSE, pdTRUE, pdMS_TO_TICKS(5000));
+
+    bool result = burn_firmware(printer, PRINTER_FW_PATH);
+    logger.log("Resultado printer OTA: ");
+    logger.logln(result ? "OK" : "FALLO");
+
+    xEventGroupClearBits(suspend_task_group,
+        TRIGGER_BIT | GENERAL_TASK_BIT | WS_TASK_BIT | HTTP_TASK_BIT);
+    vTaskResume(General_Task_Handle);
+    vTaskResume(HTTP_Task_Handle);
+    vTaskResume(Websocket_Task_Handle);
 
     trigger_fw_update[2] = false;
   }
@@ -2576,7 +2938,7 @@ void check_firmware_triggers()
     }
 
     trigger_fw_update[0] = false;
-  }
+  }*/
 }
 
 bool download_firmware(File *p_file, const char *p_endpoint)

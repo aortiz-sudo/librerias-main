@@ -9,11 +9,15 @@
 
 #include "Device.h"
 #include <SD.h>
+#include <freertos/semphr.h>
+
+extern SemaphoreHandle_t i2c_mutex;
 
 /**
  * \brief   Longitud máxima del buffer para operaciones I2C.
  */
 #define MAX_BUFFER_LEN 48
+#define FLASH_CMD_BUFFER_SIZE 135   // CMD(1) + SIZE(1) + RESERVED(1) + PAGE(128) + margen(4)
 
 /**
  * \struct i2c_param_struct
@@ -84,7 +88,7 @@ class I2C_Master_Device : public Device
          * \param p_file        Puntero al archivo del firmware.
          * \param p_file_size   Tamaño del archivo.
          */
-        status burn_firmware(Stream *p_file, size_t p_file_size);
+        status burn_firmware(File *p_file, size_t p_file_size);
 
         /**
          * \brief   Verificiar si el dispositivo I2C esta listo para recibir datos.

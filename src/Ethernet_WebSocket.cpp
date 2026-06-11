@@ -11,12 +11,9 @@ int Ethernet_WebSocket::get_data_from_server(uint8_t *p_data, size_t p_buffer_le
         return WEBSOCKET_ERROR_NO_STREAM;
 
     size_t counter = 0;
-    while(this->m_global_client->available())
+    while(this->m_global_client->available() && counter < p_buffer_len)
     {
         p_data[counter++] = this->m_global_client->read();
-
-        if(counter >= p_buffer_len)
-            break;
     }
 
     return handle_websocket_data(p_data, counter);
@@ -196,7 +193,10 @@ int Ethernet_WebSocket::handle_websocket_data(uint8_t *p_data, size_t p_length)
     {
         case WS_OPCODE_CLOSE:
         {
-            this->m_status_code = (websocket_close_status_t)((p_data[2] << 8) | p_data[3]);
+            if(p_length >= 4)
+                this->m_status_code = (websocket_close_status_t)((p_data[2] << 8) | p_data[3]);
+            else
+                this->m_status_code = NORMAL_CLOSURE;
 
             for(int i = 0; i < p_length; i++)
             {
@@ -245,6 +245,9 @@ void Ethernet_WebSocket::send_ping_message(uint8_t *p_payload, size_t p_length)
 
 void Ethernet_WebSocket::send_close_message(const char *p_message)
 {
+    if(p_message == nullptr)
+        p_message = "close";
+
     size_t length = strlen(p_message) + 2;
 
     if(length > MAX_CLOSE_MESSAGE_SIZE)

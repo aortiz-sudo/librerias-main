@@ -453,7 +453,6 @@ class calibration_state : public State
             this->m_max_counter = 3;
             this->m_last_state = MENU_SCREEN_STATE;
         }
-
         ~calibration_state() { }
         void draw() override;
         void screen(char p_key) override;

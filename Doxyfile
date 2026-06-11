@@ -1,0 +1,91 @@
+# Doxyfile para el Sistema de Despacho de Combustible (ESP32 + ATmega)
+#
+# Uso:
+#   doxygen Doxyfile
+# La salida HTML se genera en docs/html/index.html
+#
+# Este archivo solo define las opciones relevantes para el proyecto.
+# Cualquier opcion no listada toma su valor por defecto de Doxygen.
+# Para regenerar una plantilla completa y comentada: doxygen -g
+
+#---------------------------------------------------------------------------
+# Identificacion del proyecto
+#---------------------------------------------------------------------------
+PROJECT_NAME           = "Sistema de Despacho de Combustible"
+PROJECT_BRIEF          = "Firmware ESP32 + ATmega para despacho de combustible"
+OUTPUT_LANGUAGE        = Spanish
+OUTPUT_DIRECTORY       = docs
+
+#---------------------------------------------------------------------------
+# Que codigo leer
+#---------------------------------------------------------------------------
+INPUT                  = include src
+RECURSIVE              = YES
+FILE_PATTERNS          = *.h *.hpp *.cpp *.c
+INPUT_ENCODING         = UTF-8
+
+# Excluir librerias de terceros y artefactos de compilacion.
+EXCLUDE                = .pio
+EXCLUDE_PATTERNS       = */.pio/* */build/*
+
+#---------------------------------------------------------------------------
+# Que extraer
+#---------------------------------------------------------------------------
+# Documenta tambien los elementos sin comentario (util para detectar huecos).
+EXTRACT_ALL            = YES
+# Incluye funciones y variables 'static' (las funciones libres de main.cpp lo son).
+EXTRACT_STATIC         = YES
+EXTRACT_PRIVATE        = YES
+EXTRACT_LOCAL_CLASSES  = YES
+
+# Es codigo C++, no C puro.
+OPTIMIZE_OUTPUT_FOR_C  = NO
+
+# Reporta en consola los simbolos sin documentar.
+WARNINGS               = YES
+WARN_IF_UNDOCUMENTED   = YES
+WARN_NO_PARAMDOC       = YES
+
+#---------------------------------------------------------------------------
+# Preprocesador (macros y guardas de Arduino/ESP32)
+#---------------------------------------------------------------------------
+ENABLE_PREPROCESSING   = YES
+MACRO_EXPANSION        = YES
+EXPAND_ONLY_PREDEF     = NO
+# Define ESP32 para que se documenten los bloques #if defined(ESP32).
+PREDEFINED             = ESP32 \
+                         ARDUINO \
+                         IRAM_ATTR=
+
+#---------------------------------------------------------------------------
+# Codigo fuente y agrupado
+#---------------------------------------------------------------------------
+SOURCE_BROWSER         = YES
+INLINE_SOURCES         = NO
+REFERENCED_BY_RELATION = YES
+REFERENCES_RELATION    = YES
+
+#---------------------------------------------------------------------------
+# Salida HTML
+#---------------------------------------------------------------------------
+GENERATE_HTML          = YES
+HTML_OUTPUT            = html
+GENERATE_TREEVIEW      = YES
+DISABLE_INDEX          = NO
+
+#---------------------------------------------------------------------------
+# Salida LaTeX/PDF (desactivada)
+#---------------------------------------------------------------------------
+GENERATE_LATEX         = NO
+
+#---------------------------------------------------------------------------
+# Diagramas (requieren Graphviz / dot instalado)
+#---------------------------------------------------------------------------
+# Si NO tienes Graphviz, cambia HAVE_DOT a NO para evitar advertencias.
+HAVE_DOT               = YES
+CLASS_GRAPH            = YES
+COLLABORATION_GRAPH    = YES
+CALL_GRAPH             = NO
+CALLER_GRAPH           = NO
+DOT_IMAGE_FORMAT       = svg
+INTERACTIVE_SVG        = YES

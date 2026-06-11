@@ -24,13 +24,13 @@
 bool string_contains(const char *p_string, const char *p_string_contained);
 
 /**
- * \brief                   Función leer un string hasta un caracter en especifico.
- * \param p_string          String que
- * \param p_substring
- * \param p_terminator
- * \param p_buffer_size
- * 
- * \returns
+ * \brief                   Función para leer una cadena de caracteres hasta un carácter específico.
+ * \param p_string          Cadena de caracteres de origen.
+ * \param p_substring       Buffer donde se guardará la subcadena obtenida.
+ * \param p_terminator      Carácter que delimita el final de la subcadena.
+ * \param p_buffer_size     Tamaño máximo del buffer de destino.
+ *
+ * \returns                 Número de caracteres copiados en el buffer.
  */
 size_t get_substring(const char *p_string, char *p_substring, char p_terminator, size_t p_buffer_size);
 

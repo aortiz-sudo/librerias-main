@@ -52,7 +52,8 @@
  */
 #define ESC (uint8_t)0x1B
 /**
- * 
+ * \def     FS
+ * \brief   Código ASCII para File Separator.
  */
 #define FS  (uint8_t)0x1C
 
@@ -253,9 +254,9 @@ class Printer : public Peripehals
         void set_left_margin(uint16_t n);
 
         /**
-         * 
+         * \brief Desactiva el modo de caracteres chinos de la impresora.
          */
-        void cancel_chinese_mode(); 
+        void cancel_chinese_mode();
     public:
         static const status PRINTER_DISCONNECTED = 6; ///< Estado para impresora desconectada.
 };

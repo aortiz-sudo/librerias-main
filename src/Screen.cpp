@@ -92,11 +92,18 @@ status Screen::update(char p_key)
 {
     if(p_key)
         display_touch(10, 10, TOUCH);
-        
+
     this->m_current_state->screen(p_key);
     transition();
 
-    return change_pic();
+    // Solo enviar change_pic si hubo una transición real
+    if(this->m_pic_changed)
+    {
+        this->m_pic_changed = false;
+        return change_pic();
+    }
+
+    return NO_DEVICE_ERROR;
 }
 
 void Screen::init(uint8_t p_brightness)
@@ -122,6 +129,7 @@ void Screen::transition()
         this->m_current_state->set_device(this);
         this->m_current_state->draw();
         this->m_initialized = true;
+        this->m_pic_changed = true;
     }
 
     if(this->m_active_transition)
@@ -135,5 +143,6 @@ void Screen::transition()
         this->m_current_state->draw();
 
         this->m_active_transition = false;
+        this->m_pic_changed = true;
     }
 }

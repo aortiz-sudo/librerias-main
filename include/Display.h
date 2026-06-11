@@ -9,7 +9,11 @@
 #include "UART_Device.h"
 #include "Definitions.h"
 
-#define DISPLAY_BUFFER_LEN 64 //Tamaño total del buffer de datos.
+/**
+ * \def     DISPLAY_BUFFER_LEN
+ * \brief   Tamaño total del buffer de datos del display.
+ */
+#define DISPLAY_BUFFER_LEN 64
 
 /**
  * \struct display_param_struct
@@ -133,7 +137,7 @@ class Display : public UART_Device
         status set_user_variable(uint16_t p_address, uint8_t *p_value, size_t p_value_length);
 
     public:
-        static const status CRC_NO_ACTIVE = 5; //< Error que indica que el CRC no se encuentra activo
+        static const status CRC_NO_ACTIVE = 5; ///< Error que indica que el CRC no se encuentra activo
     
     private:
         /**
@@ -155,9 +159,9 @@ class Display : public UART_Device
         status send_command(command_struct *p_command) override;
     
     private:
-        uint8_t m_rtc_array[7] = { 0 };                 //< Buffer para guardar el RTC.
-        uint8_t m_buffer[DISPLAY_BUFFER_LEN] = { 0 };   //< Buffer para guardar los datos recibidos.
-        uint16_t m_crc_cmd = SET_CRC_FALSE_CMD; //< Bandera de control para el CRC.
+        uint8_t m_rtc_array[7] = { 0 };                 ///< Buffer para guardar el RTC.
+        uint8_t m_buffer[DISPLAY_BUFFER_LEN] = { 0 };   ///< Buffer para guardar los datos recibidos.
+        uint16_t m_crc_cmd = SET_CRC_FALSE_CMD;         ///< Bandera de control para el CRC.
 };
 
 /**

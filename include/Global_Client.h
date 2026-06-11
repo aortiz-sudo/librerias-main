@@ -9,8 +9,7 @@
 
 #include <Arduino.h>
 #include <ESP_SSLClient.h>
-#include <UIPEthernet.h>
-//#include <Ethernet.h>
+#include <Ethernet.h>
 #include "string_handlers.h"
 
 #if defined(ESP32)
@@ -54,7 +53,8 @@
 #define HTTP_INVALID_REQUEST         -5
 
 /**
- * 
+ * \def     HTTP_ERROR_BUFFER_OVERFLOW
+ * \brief   Código de error para sobrecarga del buffer de datos.
  */
 #define HTTP_ERROR_BUFFER_OVERFLOW   -6
 
@@ -131,12 +131,15 @@ class Global_Client
         
         /**
          * \brief                       Establece encabezados personalizados para la conexión.
-         * \param p_custom_header       Nombre del encabezado.
-         * \param p_custom_header_value Valor del encabezado.
+         * \param p_header_name         Nombre del encabezado.
+         * \param p_header_value        Valor del encabezado.
          * \param p_index               Indice en donde se guardara el encabezado.
          */
         void set_header(const char *p_header_name, const char *p_header_value, uint8_t p_index);
 
+        /**
+         * \brief   Limpia todos los encabezados personalizados configurados.
+         */
         void flush_headers();
 
         /**
@@ -175,11 +178,18 @@ class Global_Client
             this->m_secure = p_secure;
         }
 
+        /**
+         * \brief               Establece el certificado SSL para conexiones seguras.
+         * \param p_certificate Cadena con el certificado SSL (CA root).
+         */
         inline void set_certificate(const char *p_certificate)
         {
             this->m_certificate = (char *)p_certificate;
         }
 
+        /**
+         * \brief   Detiene la conexión con el servidor y libera el cliente.
+         */
         virtual inline void client_stop()
         {
             this->m_global_client->stop();
@@ -197,12 +207,6 @@ class Global_Client
         client_type m_type;                         ///< Tipo de cliente.
         bool m_secure = false;                      ///< Indica si la conexión es segura (SSL).
         char *m_certificate = nullptr;              ///< Certificado SSL.
-
-       /* static char *m_certificate[CA_CERT_SIZE] = R"EOF(
-            -----BEGIN CERTIFICATE-----
-            [TU CERTIFICADO ROOT CA AQUÍ] 
-            -----END CERTIFICATE-----
-        )EOF";*/
 
         char *m_header[MAX_HTTP_HEADERS] =          ///< Encabezados personalizados.
         { 
@@ -227,18 +231,27 @@ class Global_Client
         bool send_http_request(const char *p_type, bool http_version = true, const uint8_t *p_data = nullptr, size_t p_data_length = 0);
 
         /**
-         * 
-         * 
+         * \brief                   Procesa la respuesta HTTP del servidor y opcionalmente extrae encabezados.
+         * \param p_headers          Arreglo con los nombres de los encabezados a buscar.
+         * \param p_headers_values   Arreglo donde se almacenarán los valores de los encabezados encontrados.
+         * \param p_headers_count    Número de encabezados a buscar.
+         * \param p_data             Buffer opcional donde guardar el cuerpo de la respuesta.
+         * \param p_data_length      Longitud máxima del buffer de datos.
+         * \returns                  Código HTTP de la respuesta.
          */
         int http_response(const char p_headers[][128], char p_headers_values[][64], int p_headers_count, uint8_t *p_data = nullptr, size_t p_data_length = 0);
 
+        /**
+         * \brief   Procesa la respuesta HTTP del servidor sin extraer encabezados.
+         * \returns Código HTTP de la respuesta.
+         */
         int http_response()
         {
             return http_response(nullptr, nullptr, 0);
         }
 
     private:
-        const char *m_requests[4] = { "POST", "GET", "PUT", "PATCH" };
+        const char *m_requests[4] = { "POST", "GET", "PUT", "PATCH" }; ///< Nombres de los métodos HTTP soportados.
 };        
 
 #endif

@@ -37,9 +37,9 @@ typedef enum : uint8_t
  */
 typedef enum : uint8_t
 {
-    NO_CRC, //< Sin CRC.
-    CRC_8,  //< CRC 8 bits.
-    CRC_16, //< CRC 16 bits.
+    NO_CRC, ///< Sin CRC.
+    CRC_8,  ///< CRC 8 bits.
+    CRC_16, ///< CRC 16 bits.
 } crc_type;
 
 /**
@@ -102,7 +102,19 @@ class Device : public Print
         virtual size_t read_data(uint8_t *p_buffer, size_t p_buffer_length) = 0;
 
         /*------- Implementacion de Función para compatibilidad -------*/
+        /**
+         * \brief           Escribe un byte en el dispositivo (heredado de Print).
+         * \param p_data    Byte a enviar.
+         * \returns         Número de bytes escritos.
+         */
         size_t write(uint8_t p_data);
+
+        /**
+         * \brief           Escribe un buffer de datos en el dispositivo (heredado de Print).
+         * \param p_data    Buffer de datos a enviar.
+         * \param p_length  Número de bytes a enviar.
+         * \returns         Número de bytes escritos.
+         */
         size_t write(uint8_t *p_data, size_t p_length);
         
         /**

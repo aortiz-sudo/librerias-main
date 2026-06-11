@@ -252,14 +252,14 @@ extern "C"
  */
 #define BUSINESS_RFC_SIZE   (uint8_t)0x10
 /**
- * \def   GITHUB_TOKEN_SIZE
- * \brief Tamaño máximo del token de github.
- */
+* \def PRODUCT_SIZE
+*  \brief Tamaño máximo para el identificador de producto. 
+*/
 #define PRODUCT_SIZE        (uint8_t)0x10
 /**
- * \def   PRICE_SIZE
- * \brief Tamaño máximo para el precio.
- */
+* \def GITHUB_TOKEN_SIZE
+*  \brief Tamaño máximo del token de github.
+*/
 #define GITHUB_TOKEN_SIZE   (uint8_t)0x30
 /**
  * \def   TICKET_NUMBER_SIZE
@@ -272,8 +272,8 @@ extern "C"
  */
 #define MAX_FUEL_LEVEL_SIZE (uint8_t)0x02
 /**
- * \def   PRODUCT_SIZE
- * \brief Tamaño máximo para el identificador de producto.
+ * \def   PRICE SIZE
+ * \brief Tamaño máximo para el precio.
  */
 #define PRICE_SIZE          (uint8_t)0x04
 /**
@@ -452,20 +452,22 @@ extern "C"
  */
 #define Printer_Index 2
 
-#define RTC_YEAR_INDEX    0
-#define RTC_MONTH_INDEX   1
-#define RTC_DAY_INDEX     2
-#define RTC_HOUR_INDEX    4
-#define RTC_MINUTE_INDEX  5
-#define RTC_SECOND_INDEX  6
+/*--------------- ÍNDICES DEL ARREGLO RTC ---------------*/
+#define RTC_YEAR_INDEX    0     ///< Índice del año en el arreglo RTC.
+#define RTC_MONTH_INDEX   1     ///< Índice del mes en el arreglo RTC.
+#define RTC_DAY_INDEX     2     ///< Índice del día en el arreglo RTC.
+#define RTC_HOUR_INDEX    4     ///< Índice de la hora en el arreglo RTC.
+#define RTC_MINUTE_INDEX  5     ///< Índice del minuto en el arreglo RTC.
+#define RTC_SECOND_INDEX  6     ///< Índice del segundo en el arreglo RTC.
 
-#define MAX_NUMBER_OF_USERS 32
-#define MAX_NUMBER_OF_DISPATCHES 48
-#define MAX_EVENT_JSON_LENGTH 256
-#define MAX_UPDATE_JSON_LENGTH 64
+#define MAX_NUMBER_OF_USERS 32          ///< Número máximo de usuarios registrados.
+#define MAX_NUMBER_OF_DISPATCHES 48     ///< Número máximo de despachos almacenados.
+#define MAX_EVENT_JSON_LENGTH 256       ///< Longitud máxima del JSON de un evento.
+#define MAX_UPDATE_JSON_LENGTH 64       ///< Longitud máxima del JSON de una actualización.
 
-#define TRIGGER_BIT       (1 << 0)
-#define GENERAL_TASK_BIT  (1 << 1)
-#define WS_TASK_BIT       (1 << 2)
-#define HTTP_TASK_BIT     (1 << 3)
+/*--------------- BITS DE EVENTO DE LAS TAREAS (FreeRTOS) ---------------*/
+#define TRIGGER_BIT       (1 << 0)  ///< Bit de evento para disparar una acción.
+#define GENERAL_TASK_BIT  (1 << 1)  ///< Bit de evento para la tarea general.
+#define WS_TASK_BIT       (1 << 2)  ///< Bit de evento para la tarea WebSocket.
+#define HTTP_TASK_BIT     (1 << 3)  ///< Bit de evento para la tarea HTTP.
 

@@ -107,9 +107,25 @@
  */
 #define WS_MASK         (uint8_t)0x80
 
+/**
+ * \def     MAX_PONG_MESSAGE_SIZE
+ * \brief   Tamaño máximo del payload de un mensaje pong.
+ */
 #define MAX_PONG_MESSAGE_SIZE 32
+/**
+ * \def     MAX_PING_MESSAGE_SIZE
+ * \brief   Tamaño máximo del payload de un mensaje ping.
+ */
 #define MAX_PING_MESSAGE_SIZE 32
+/**
+ * \def     MAX_MESSAGE_SIZE
+ * \brief   Tamaño máximo de un mensaje WebSocket.
+ */
 #define MAX_MESSAGE_SIZE 512
+/**
+ * \def     MAX_CLOSE_MESSAGE_SIZE
+ * \brief   Tamaño máximo del payload de un mensaje de cierre.
+ */
 #define MAX_CLOSE_MESSAGE_SIZE 64
 
 /**
@@ -231,7 +247,8 @@ class Ethernet_WebSocket : public Global_Client
         }
 
         /**
-         * 
+         * \brief               Establece el código de estado de cierre WebSocket.
+         * \param p_status_code  Código de cierre a establecer.
          */
         inline void set_status_code(websocket_close_status_t p_status_code)
         {
@@ -286,6 +303,13 @@ class Ethernet_WebSocket : public Global_Client
         int handle_websocket_data(uint8_t *p_data, size_t p_length);
 
     private:
+        /**
+         * \brief           Construye y envía un frame WebSocket con el opcode indicado.
+         * \param p_opcode  Opcode del frame (texto, binario, ping, pong, cierre).
+         * \param p_payload Buffer con el payload a enviar.
+         * \param p_length  Longitud del payload.
+         * \returns         Cantidad de datos enviados.
+         */
         int send_message(uint8_t p_opcode, uint8_t *p_payload, size_t p_length);
 
 };

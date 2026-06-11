@@ -10,6 +10,11 @@
 #include "Definitions.h"
 #include "Display.h"
 
+
+/**
+ * \def     FIRMWARE_VERSION
+ * \brief   Versión del firmware para la pantalla.
+*/
 #define FIRMWARE_VERSION "1.0.0"  ///< Versión del firmware.
 /**
  * \def     PORT_DISPLAY

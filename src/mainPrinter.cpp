@@ -1,3 +1,11 @@
+/**
+ * @file  mainPrinter.cpp
+ * @brief Firmware del controlador de la impresora (esclavo I2C).
+ *
+ * Recibe comandos por I2C desde el controlador principal, ejecuta las acciones de
+ * impresión y monitorea el voltaje de batería y el estado satelital.
+ */
+
 #include "mainprinter.h"
 
 //HC05 hc05;
@@ -5,27 +13,39 @@
 //char printer_mac_address[18] = "";
 //bool mac_address = false;
 
-volatile uint8_t i2c_rx_data[I2C_BUFFER_LEN];
-volatile bool i2c_data_received = false;
-volatile uint8_t i2c_rx_counter = 0;
-float voltage = 0.0;
-uint8_t sat_out = 0;
-uint8_t printer_connected = 0;
-bool executed = false;
+volatile uint8_t i2c_rx_data[I2C_BUFFER_LEN];   ///< Buffer de datos recibidos por I2C.
+volatile bool i2c_data_received = false;        ///< Indica si se recibieron datos por I2C.
+volatile uint8_t i2c_rx_counter = 0;            ///< Contador de bytes recibidos por I2C.
+float voltage = 0.0;                            ///< Voltaje de batería leído.
+uint8_t sat_out = 0;                            ///< Estado de la salida satelital.
+uint8_t printer_connected = 0;                  ///< Estado de conexión de la impresora.
+bool executed = false;                          ///< Indica si el último comando fue ejecutado.
 
+/** @brief Handler de recepción I2C. @param length Número de bytes recibidos. */
 void I2C_RxHandler(int length);
+/** @brief Handler de petición I2C (envío de datos al maestro). */
 void I2C_TxHandler();
+/** @brief Obtiene el voltaje de batería a partir del divisor de voltaje. @return Voltaje en volts. */
 float get_voltage();
+/** @brief Obtiene el voltaje de referencia (VCC) del microcontrolador. @return Voltaje VCC en volts. */
 float get_vcc();
+/** @brief Promedia varias lecturas analógicas de un pin. @param p_pin Pin a leer. @param p_times Número de lecturas. @return Promedio de las lecturas. */
 float get_avg_analog_read(const uint8_t p_pin, int p_times);
 //void build_hc05();
+/** @brief Ejecuta el comando I2C recibido. @param p_command Comando a ejecutar. */
 void execute_i2c_command(uint8_t p_command);
+/** @brief Asigna los datos recibidos por I2C a su destino. @param p_data Buffer de datos. @param p_length Longitud de los datos. */
 void assign_data(uint8_t *p_data, size_t p_length);
+/** @brief Procesa el comando I2C pendiente si se recibieron datos. */
 void received();
 //void print_ticket(bool p_day_ticket);
+/** @brief Configura el watchdog timer del sistema. */
 void configure_wdt();
 
-void setup() 
+/**
+ * @brief Función de configuración inicial de Arduino. Inicializa el I2C esclavo, el puerto serie y el watchdog.
+ */
+void setup()
 {
   configure_wdt();
 
@@ -39,7 +59,10 @@ void setup()
   pinMode(sat_out_pin, INPUT);
 }
 
-void loop() 
+/**
+ * @brief Bucle principal: procesa comandos I2C y actualiza el voltaje y estados de los periféricos.
+ */
+void loop()
 {
   received();
 

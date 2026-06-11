@@ -92,8 +92,9 @@ class Screen : public I2C_Master_Device
         }
 
         /**
-         * 
-         * 
+         * \brief               Asocia una función callback a un estado de pantalla específico.
+         * \param p_function     Función callback a ejecutar en el estado.
+         * \param p_state        Estado de pantalla al que se asocia la función.
          */
         inline void set_sate_callback(state_callback_function p_function, screen_state p_state)
         {
@@ -250,6 +251,16 @@ class Screen : public I2C_Master_Device
         status change_pic();
 
         /**
+         * \brief   Solicita el envío de change_pic() en el próximo update().
+         *          Útil cuando el contenido de la pantalla cambia sin transición de estado
+         *          (p. ej., navegación de menú con UP/DOWN, reset de counter con CLEAR).
+         */
+        inline void request_pic_update()
+        {
+            this->m_pic_changed = true;
+        }
+
+        /**
          * \brief               Establece el brillo de la pantalla.
          * \param p_brightness  Valor de brillo.
          * \param p_save        true: Guarda el valor. false: No lo guarda.
@@ -375,6 +386,7 @@ class Screen : public I2C_Master_Device
         float m_price = 0.0;                          ///< Precio actual.
         uint8_t m_brightness = 100;                   ///< Brillo actual.
         char* m_product = nullptr;                    ///< Producto actual.
+        bool m_pic_changed = false;                   ///< Indica si la imagen ha cambiado.
 };
 
 /**

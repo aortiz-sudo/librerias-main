@@ -45,6 +45,7 @@ void State::handle_special_key(char p_key, uint8_t p_counter)
             if(this->m_menu)
             {
                 this->m_counter = decrement_counter(this->m_counter, this->m_max_counter);
+                this->m_device->request_pic_update();
                 logger.logln(this->m_counter);
             }
             return;
@@ -53,6 +54,7 @@ void State::handle_special_key(char p_key, uint8_t p_counter)
             if(this->m_menu)
             {
                 this->m_counter = increment_counter(this->m_counter, this->m_max_counter);
+                this->m_device->request_pic_update();
                 logger.logln(this->m_counter);
             }
             return;
@@ -62,12 +64,15 @@ void State::handle_special_key(char p_key, uint8_t p_counter)
             return;
 
         case BACK:
-            this->m_device->set_transition(true, this->m_last_state);   
+            this->m_device->set_transition(true, this->m_last_state);
         return;
 
         case CLEAR:
             if(p_counter > 0)
+            {
                 this->m_counter = 0;
+                this->m_device->request_pic_update();
+            }
         return;
     }
 }
@@ -174,10 +179,11 @@ void menu_state::screen(char p_key)
         handle_special_key(p_key, this->m_counter);
         return;
     }
-    
+
     if(p_key >= '1' && p_key <= this->m_max_counter + (uint8_t)('0'))
     {
         this->m_counter = (uint8_t)(p_key - '0');
+        this->m_device->request_pic_update();
         logger.logln(this->m_counter);
         return;
     }
@@ -210,10 +216,11 @@ void menu_cal_state::screen(char p_key)
         handle_special_key(p_key, this->m_counter);
         return;
     }
-    
+
     if(p_key >= '1' && p_key <= this->m_max_counter + (uint8_t)('0'))
     {
         this->m_counter = (uint8_t)(p_key - '0');
+        this->m_device->request_pic_update();
         logger.logln(this->m_counter);
         return;
     }
@@ -239,10 +246,11 @@ void dispatch_menu_state::screen(char p_key)
         handle_special_key(p_key, this->m_counter);
         return;
     }
-    
+
     if(p_key == '1' || p_key =='2')
     {
         this->m_counter = (uint8_t)(p_key - '0');
+        this->m_device->request_pic_update();
         logger.logln(this->m_counter);
         return;
     }
@@ -280,6 +288,7 @@ void reprint_menu_state::screen(char p_key)
     if(p_key == '1' || p_key == '2')
     {
         this->m_counter = (uint8_t)(p_key - '0');
+        this->m_device->request_pic_update();
         logger.logln(this->m_counter);
         return;
     }
@@ -310,6 +319,7 @@ void config_menu_state::screen(char p_key)
     if(p_key >= '1' && p_key <= '4')
     {
         this->m_counter = (uint8_t)(p_key - '0');
+        this->m_device->request_pic_update();
         logger.logln(this->m_counter);
         return;
     }
@@ -405,12 +415,25 @@ void quantity_dispatch_state::screen(char p_key)
 
     if(p_key)
     {
+        // Primera pulsación de UP/DOWN: UP selecciona opción de arriba (litros),
+        // DOWN selecciona opción de abajo (precio). Después alternan normalmente.
+        if((p_key == UP || p_key == DOWN) && this->m_counter == 0)
+        {
+            this->m_counter = (p_key == UP) ? 1 : 2;
+            this->m_device->request_pic_update();
+            this->m_digit_counter[0] = 0;
+            this->m_digit_counter[1] = 0;
+            this->m_dispatch_values[0] = 0;
+            this->m_dispatch_values[1] = 0;
+            return;
+        }
+
         handle_special_key(p_key, 0);
 
         if(p_key == UP || p_key == DOWN)
         {
             this->m_digit_counter[0] = 0;
-            this->m_digit_counter[1] = 0;   
+            this->m_digit_counter[1] = 0;
             this->m_dispatch_values[0] = 0;
             this->m_dispatch_values[1] = 0;
 
@@ -482,64 +505,83 @@ void dispatch_state::draw()
 
 void dispatch_state::screen(char p_key)
 {
-    if(!isDigit(p_key))
+    // Manejo de teclas según el sub-estado actual
+    if(p_key)
     {
-        //handle_special_key(p_key);
-
-        if(p_key == BACK)
+        switch(this->m_counter)
         {
-            logger.logln(this->m_counter);
-            if(this->m_counter == 0)
-                this->m_state_callback_function((uint8_t *)&m_dispatched_volume, 2);
-
-            if(this->m_counter == 1 && m_dispatched_volume > 0.0)
-                this->m_state_callback_function((uint8_t *)&m_dispatched_volume, 3);
-
-            if(this->m_counter == 2)
+            case 0: // 0x12 - PRESS_TO_START
             {
-                this->m_state_callback_function((uint8_t *)&m_dispatched_volume, 2);
-                this->m_device->set_transition(true, DISPATCH_MENU_SCREEN_STATE);
+                if(p_key == ENTER) // && this->m_device->get_tag_detected() 
+                {
+                    dispatch_initialized = true;
+                    this->m_counter = 1;
+                    this->m_device->set_dispatching(true);
+                    this->m_state_callback_function((uint8_t *)&m_dispatched_volume, 0);
+                    const char *text = "                 ";
+                    this->m_device->write_to_address(DISPLAY_TAG_MESSAGE_ADDRESS, (uint8_t *)text, strlen(text));
+                }
+                else if(p_key == BACK)
+                {
+                    this->m_device->set_transition(true, DISPATCH_MENU_SCREEN_STATE);
+                }
+                break;
             }
-            
-            if(this->m_counter < this->m_max_counter)
-                this->m_counter++;
 
-            this->m_device->set_dispatching(false);
+            case 1: // 0x13 - DISPATCHING_STARTED
+            {
+                if(p_key == BACK)
+                {
+                    this->m_counter = 2;
+                    this->m_device->set_dispatching(false);
+                    this->m_state_callback_function((uint8_t *)&m_dispatched_volume, 2);
+                }
+                break;
+            }
 
-            return;
-        }
+            case 2: // 0x14 - DISPATCHING_IDLE (pausado)
+            {
+                if(p_key == ENTER)
+                {
+                    this->m_counter = 1;
+                    this->m_device->set_dispatching(true);
+                    this->m_state_callback_function((uint8_t *)&m_dispatched_volume, 0);
+                }
+                else if(p_key == BACK)
+                {
+                    this->m_counter = 3;
+                    this->m_state_callback_function((uint8_t *)&m_dispatched_volume, 3);
+                }
+                break;
+            }
 
-        if((p_key == ENTER || (this->m_device->get_tag_detected() && !dispatch_initialized)) && this->m_counter < 2 && !this->m_device->get_dispatching())
-        {
-            dispatch_initialized = true;
-            this->m_counter = 0;
-            this->m_device->set_dispatching(true);
-            this->m_state_callback_function((uint8_t *)&m_dispatched_volume, 0);
-            const char *text = "                 ";
-            this->m_device->write_to_address(DISPLAY_TAG_MESSAGE_ADDRESS, (uint8_t *)text, strlen(text));
+            case 3: // 0x15 - DISPATCHING_FINISH
+            {
+                if(p_key == BACK)
+                {
+                    this->m_device->set_transition(true, DISPATCH_MENU_SCREEN_STATE);
+                }
+                break;
+            }
         }
     }
 
-    if(this->m_counter == 0 && !this->m_device->get_calibration_pin_state())
+    // Seguridad: pausar automáticamente si se abre el gabinete durante despacho
+    if(this->m_counter == 1 && !this->m_device->get_calibration_pin_state())
     {
         if(OPENED_CABINET)
         {
-            this->m_counter = 1;
+            this->m_counter = 2;
             this->m_device->set_dispatching(false);
+            this->m_state_callback_function((uint8_t *)&m_dispatched_volume, 2);
             const char *text1 = "                 ";
             this->m_device->write_to_address(DISPLAY_TAG_MESSAGE_ADDRESS, (uint8_t *)text1, strlen(text1));
             const char *text2 = "GABINETE ABIERTO";
             this->m_device->write_to_address(DISPLAY_TAG_MESSAGE_ADDRESS, (uint8_t *)text2, strlen(text2));
         }
-        else if(CLOSED_CABINET)
-        {
-            this->m_counter = 0;
-            this->m_device->set_dispatching(true);
-            const char *text = "                   ";
-            this->m_device->write_to_address(DISPLAY_TAG_MESSAGE_ADDRESS, (uint8_t *)text, strlen(text));
-        }
     }
-    
+
+    // Actualización continua de volumen/costo despachado
     if(this->m_device->get_dispatching())
     {
         this->m_state_callback_function((uint8_t *)&m_dispatched_volume, 1);
@@ -550,23 +592,25 @@ void dispatch_state::screen(char p_key)
         this->m_device->write_to_address(DISPLAY_DISPATCHED_COST_ADDRESS, (uint8_t *)&int_dispatched_cost, sizeof(uint32_t), true);
     }
 
+    // Despacho por cantidad: reducir velocidad al 80%
     if(m_dispatched_volume >= m_volume * 0.80 && m_quantity_dispatch && !already_stop)
-    {   
+    {
         already_stop = true;
         this->m_state_callback_function((uint8_t*)&m_dispatched_volume, 4);
     }
 
-    if(m_dispatched_volume >= m_volume && m_quantity_dispatch && this->m_counter < 2)
+    // Despacho por cantidad: finalizar automáticamente al alcanzar el objetivo
+    if(m_dispatched_volume >= m_volume && m_quantity_dispatch && this->m_counter == 1)
     {
-        this->m_counter = 2;
+        this->m_device->set_dispatching(false);
         this->m_state_callback_function((uint8_t *)&m_dispatched_volume, 1);
         m_dispatched_cost = m_price * m_dispatched_volume;
         uint32_t int_dispatched_liters = (uint32_t)(m_dispatched_volume * 100);
         uint32_t int_dispatched_cost = (uint32_t)(m_dispatched_cost * 100);
         this->m_device->write_to_address(DISPLAY_DISPATCHED_VOLUME_ADDRESS, (uint8_t *)&int_dispatched_liters, sizeof(uint32_t), true);
         this->m_device->write_to_address(DISPLAY_DISPATCHED_COST_ADDRESS, (uint8_t *)&int_dispatched_cost, sizeof(uint32_t), true);
-        this->m_device->set_dispatching(false);
         this->m_state_callback_function((uint8_t *)&m_dispatched_volume, 3);
+        this->m_counter = 3;
     }
 }
 

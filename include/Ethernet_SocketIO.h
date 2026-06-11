@@ -125,8 +125,11 @@ class Ethernet_SocketIO : public Ethernet_WebSocket
         void set_event(const char *p_event, event_callback p_callback_function);
 
         /**
-         * 
-         * 
+         * \brief               Envía un evento al servidor dentro del namespace indicado.
+         * \param p_namespace    Namespace por el que se enviará el evento.
+         * \param p_event_name   Nombre del evento a emitir.
+         * \param p_payload      Datos (payload) asociados al evento.
+         * \returns             true si el evento se envió correctamente, false en caso contrario.
          */
         bool send_event(const char *p_namespace, const char *p_event_name, const char *p_payload);
 
@@ -144,7 +147,9 @@ class Ethernet_SocketIO : public Ethernet_WebSocket
         }
 
         /**
-         * 
+         * \brief               Obtiene el índice asociado a un namespace registrado.
+         * \param p_namespace    Cadena con el namespace a buscar.
+         * \returns             Índice del namespace si existe, -1 si no se encuentra.
          */
         inline int get_namespace_index(const char *p_namespace)
         {
@@ -160,19 +165,19 @@ class Ethernet_SocketIO : public Ethernet_WebSocket
 
         /**
          * \brief               Establece el identificador para unirse al namespace.
-         * \param p_identifier  Identificador.
-         * \param p_valie       Valor del identificador.
+         * \param p_identifier  Nombre del identificador.
+         * \param p_value       Valor del identificador.
          */
         void set_identifer(const char *p_identifier, const char *p_value);
 
     private:
-        char *m_namespace[MAX_NUMBER_OF_NAMPESPACES] =  /// Arreglo de namespaces.
+        char *m_namespace[MAX_NUMBER_OF_NAMPESPACES] =      ///< Arreglo de namespaces registrados.
         {
             nullptr, nullptr, nullptr, nullptr
         };
         char m_sid[25] = { 0 };                             ///< Session ID.
         char *m_identifier = nullptr;                       ///< Nombre del identificador.
-        char *m_identifier_value = nullptr;
+        char *m_identifier_value = nullptr;                 ///< Valor del identificador.
         event_callback m_callback_functions[MAX_NUMBER_OF_EVENTS] = { 0 }; ///< Arreglo de funciones callback para eventos.
         char *m_events[MAX_NUMBER_OF_EVENTS] = { 0 };       ///< Arreglo de nombres de eventos.
         uint8_t m_event_counter = 0;                        ///< Contador de eventos registrados.

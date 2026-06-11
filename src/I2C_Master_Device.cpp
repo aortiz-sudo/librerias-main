@@ -41,13 +41,19 @@ size_t I2C_Master_Device::write_data(uint8_t *p_data, size_t p_data_legth)
     uint8_t transmission_status = 1;
     uint8_t counter = 10;
 
+    xSemaphoreTake(i2c_mutex, portMAX_DELAY);
+
     while(transmission_status != 0 && counter--)
     {
         static_cast<TwoWire *>(get_port())->beginTransmission(this->m_address);
         count = this->get_port()->write(p_data, p_data_legth);
         transmission_status = static_cast<TwoWire *>(get_port())->endTransmission();
-        vTaskDelay(10 / portTICK_PERIOD_MS);
+
+        //if(transmission_status != 0)
+            vTaskDelay(20 / portTICK_PERIOD_MS);
     }
+
+    xSemaphoreGive(i2c_mutex);
 
     if(transmission_status != 0)
     {
@@ -61,13 +67,13 @@ size_t I2C_Master_Device::write_data(uint8_t *p_data, size_t p_data_legth)
         set_status(DATA_OUT_OF_RANGE_ERROR);
         return 0;
     }
-    
+
     if(transmission_status == 2 || transmission_status == 3)
     {
         set_status(NACK_ERROR);
         return 0;
     }
-    
+
     if(transmission_status == 5)
     {
         set_status(TIMEOUT_ERROR);
@@ -81,6 +87,9 @@ size_t I2C_Master_Device::write_data(uint8_t *p_data, size_t p_data_legth)
 size_t I2C_Master_Device::read_data(uint8_t *p_buffer, size_t p_buffer_length)
 {
     set_status(NO_DEVICE_ERROR);
+
+    xSemaphoreTake(i2c_mutex, portMAX_DELAY);
+
     size_t count = 0;
     count = static_cast<TwoWire *>(get_port())->requestFrom(m_address, p_buffer_length);
 
@@ -95,6 +104,8 @@ size_t I2C_Master_Device::read_data(uint8_t *p_buffer, size_t p_buffer_length)
     }
     else
         set_status(TIMEOUT_ERROR);
+
+    xSemaphoreGive(i2c_mutex);
 
     return received_bytes;
 }
@@ -111,7 +122,7 @@ status I2C_Master_Device::reset_device()
     return send_command(&command);
 }
 
-status I2C_Master_Device::burn_firmware(Stream *p_file, size_t p_file_size)
+status I2C_Master_Device::burn_firmware(File *p_file, size_t p_file_size)
 {
     uint8_t main_app_address = this->m_address;
     reset_device();
@@ -137,11 +148,12 @@ status I2C_Master_Device::burn_firmware(Stream *p_file, size_t p_file_size)
     command.type = I2C_START_FLASHING_CMD;
     command.data = &start_buffer[1];  // Solo enviar bytes después del comando
     command.length = 3;
-    command.address = this->m_address;  // Usar dirección original
+    command.address = this->m_address;  
     
     if(send_command(&command) != NO_DEVICE_ERROR)
     {
         logger.logln("No se pudo inicializar el flasheo del nuevo firmware.");
+        set_address(main_app_address);
         return get_status();
     }
     
@@ -156,31 +168,27 @@ status I2C_Master_Device::burn_firmware(Stream *p_file, size_t p_file_size)
     // Tamaño total: 131 bytes (1 + 1 + 1 + 128)
     uint8_t flash_buffer[131];
     
-    command.type = I2C_FLASH_TO_ADDRESS_CMD;
-    command.data = &flash_buffer[1];  // Después del comando
-    command.length = 130;  // SIZE + RESERVED + 128 bytes de datos
-    
     while(current_page < total_pages)
-    {   
+    {
         flash_buffer[0] = I2C_FLASH_TO_ADDRESS_CMD;  // 0x3C
         flash_buffer[1] = 128;  // SIZE: siempre 128 bytes
         flash_buffer[2] = 0x00; // RESERVED (byte reservado)
-        
+
         // Los datos comienzan en flash_buffer[3]
         uint8_t *page_data = &flash_buffer[3];
-        
+
         // Leer hasta 128 bytes del archivo
         size_t bytes_to_read = PAGE_SIZE;
         if(total_bytes_written + bytes_to_read > p_file_size)
         {
             bytes_to_read = p_file_size - total_bytes_written;
         }
-        
+
         if(bytes_to_read > 0)
         {
-            size_t bytes_read = p_file->readBytes(page_data, bytes_to_read);
+            size_t bytes_read = p_file->readBytes(reinterpret_cast<char*>(page_data), bytes_to_read);
             total_bytes_written += bytes_read;
-            
+
             // Rellenar el resto con 0xFF (flash vacío)
             for(size_t i = bytes_read; i < PAGE_SIZE; i++)
                 page_data[i] = 0xFF;
@@ -191,30 +199,38 @@ status I2C_Master_Device::burn_firmware(Stream *p_file, size_t p_file_size)
             for(size_t i = 0; i < PAGE_SIZE; i++)
                 page_data[i] = 0xFF;
         }
-        
+
         logger.log("Escribiendo pagina ");
         logger.log(current_page);
         logger.log(" de ");
         logger.logln(total_pages);
-        
-        // Verificar que el dispositivo esté listo
-        if(!device_ready())
-        {
-            logger.logln("El dispositivo no responde.");
-            return set_status(TIMEOUT_ERROR);
-        }
-        
-        // Enviar página
-        if(send_command(&command) != NO_DEVICE_ERROR)
+
+        // Enviar página directamente por I2C (131 bytes, no cabe en send_command)
+        if(write_data(flash_buffer, sizeof(flash_buffer)) == 0)
         {
             logger.logln("No se pudo escribir la pagina.");
+            set_address(main_app_address);
             return get_status();
         }
         
-        current_page++;
-        
-        // Delay entre páginas para dar tiempo al bootloader
+       // Esperar a que el bootloader procese la página (erase + write ~4.5ms)
         vTaskDelay(50 / portTICK_PERIOD_MS);
+
+        // Leer estado del bootloader para verificar escritura correcta
+        uint8_t page_status = 0xFF;
+        size_t status_bytes = read_data(&page_status, 1);
+
+        if(status_bytes != 1 || page_status != 0x00)  // 0x00 = ERROR_NONE
+        {
+            logger.log("Error en pagina ");
+            logger.log(current_page);
+            logger.log(": codigo ");
+            logger.logln(page_status);
+            set_address(main_app_address);
+            return set_status(NACK_ERROR);
+        }
+
+        current_page++;
     }
     
     // Verificación CRC
@@ -234,6 +250,7 @@ status I2C_Master_Device::burn_firmware(Stream *p_file, size_t p_file_size)
     if(send_command(&command) != NO_DEVICE_ERROR)
     {
         logger.logln("Error al verificar CRC.");
+        set_address(main_app_address);
         return get_status();
     }
     
@@ -245,6 +262,7 @@ status I2C_Master_Device::burn_firmware(Stream *p_file, size_t p_file_size)
     if(bytes_read != 1)
     {
         logger.logln("No se recibió respuesta de verificación CRC.");
+        set_address(main_app_address);
         return set_status(TIMEOUT_ERROR);
     }
 
@@ -257,23 +275,28 @@ status I2C_Master_Device::burn_firmware(Stream *p_file, size_t p_file_size)
     case 4:  // ERROR_CRC_MISMATCH
         logger.logln("ERROR CRITICO: CRC no coincide!");
         logger.logln("El firmware corrupto. Abortando actualizacion.");
+        set_address(main_app_address);
         return set_status(NACK_ERROR);
-        
+
     case 1:  // ERROR_INVALID_SIZE
         logger.logln("ERROR: Tamaño de firmware invalido.");
+        set_address(main_app_address);
         return set_status(DATA_OUT_OF_RANGE_ERROR);
-        
+
     case 2:  // ERROR_INVALID_ADDRESS
         logger.logln("ERROR: Direccion de memoria invalida.");
+        set_address(main_app_address);
         return set_status(DATA_OUT_OF_RANGE_ERROR);
-        
+
     case 3:  // ERROR_WRITE_FAILED
         logger.logln("ERROR: Fallo al escribir en flash.");
+        set_address(main_app_address);
         return set_status(NACK_ERROR);
-        
+
     default:
         logger.log("ERROR DESCONOCIDO: ");
         logger.logln(error_code);
+        set_address(main_app_address);
         return set_status(NACK_ERROR);
 }
     
@@ -288,12 +311,14 @@ status I2C_Master_Device::burn_firmware(Stream *p_file, size_t p_file_size)
     if(send_command(&command) != NO_DEVICE_ERROR)
     {
         logger.logln("Error al iniciar aplicación.");
+        set_address(main_app_address);
         return get_status();
     }
     
     // Esperar un poco antes de continuar
     vTaskDelay(500 / portTICK_PERIOD_MS);
-    
+
+    set_address(main_app_address);
     return get_status();
 }
 
@@ -302,10 +327,10 @@ bool I2C_Master_Device::device_ready()
     int state = 1;
     unsigned long time = millis();
 
-    while(state != 0 && time - millis() < 5000)
+    while(state != 0 && millis() - time < 5000)
     {
-        Wire.beginTransmission(this->m_address + 0x10);
-        state = Wire.endTransmission();
+        static_cast<TwoWire *>(get_port())->beginTransmission(this->m_address + 0x10);
+        state = static_cast<TwoWire *>(get_port())->endTransmission();
         vTaskDelay(10 / portTICK_PERIOD_MS);
     }
 
@@ -339,7 +364,7 @@ status I2C_Master_Device::send_command(command_struct *p_command)
 
     if(length > I2C_BUFFER_LENGTH)
         length = I2C_BUFFER_LENGTH;
-    
+
     if(p_command->data && length > 1)
         memcpy(&data[1], p_command->data, length - 1);
 

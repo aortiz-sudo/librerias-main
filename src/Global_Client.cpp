@@ -26,6 +26,8 @@ bool Global_Client::connect_to_server()
         }
 
         this->m_ssl_client.setClient(&this->m_client);
+        this->m_ssl_client.setTimeout(5000);
+        this->m_ssl_client.setHandshakeTimeout(5000);
         this->m_global_client = &this->m_ssl_client;
     }
     else

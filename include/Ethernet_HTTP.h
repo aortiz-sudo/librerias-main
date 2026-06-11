@@ -8,7 +8,6 @@
 #define _ETHERNET_HTTP
 
 #include <Global_Client.h>
-//#include <Ethernet.h>
 
 /**
  * \class Ethernet_HTTP
@@ -28,7 +27,7 @@ class Ethernet_HTTP : public Global_Client
         /**
          * \brief                   Obtiene datos del servidor mediante una petición HTTP GET.
          * \param p_data            Buffer donde se almacenarán los datos recibidos.
-         * \param p_buffer_length   Longitud máxima del buffer.
+         * \param p_data_length     Longitud máxima del buffer.
          * \returns                 Código de estado o cantidad de datos recibidos.
          */
         int get_data_from_server(uint8_t *p_data = nullptr, size_t p_data_length = 0) override;
@@ -52,6 +51,7 @@ class Ethernet_HTTP : public Global_Client
         /**
          * \brief           Descarga contenido desde alguna URL.
          * \param p_stream  Puntero a donde se quiere guardar el contenido.
+         * \returns         Código de estado o cantidad de bytes descargados.
          */
         int download_content(Stream *p_stream);
 
@@ -86,7 +86,7 @@ class Ethernet_HTTP : public Global_Client
     
     private:
 
-        char m_response[2048] = { 0 };
+        char m_response[2048] = { 0 }; ///< Buffer para la respuesta HTTP del servidor.
 
 };
 
