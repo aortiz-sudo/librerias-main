@@ -1,11 +1,4 @@
-.pio/libdeps
-.pio/build/project.checksum
-.pio/build/printer/*
-.pio/build/disiplay/*
-.pio/build/esp32dev/*
-.pio/build/esp32_debug/*
-.pio/build/display_debug/*
-.pio/build/printer_debug/*
+.pio/
 bootloader_display/*
 bootloader_printer/*
 .vscode/.browse.c_cpp.db*
