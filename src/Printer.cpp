@@ -162,7 +162,7 @@ void Printer::print_last_ticket(ticket_struct *p_ticket)
 
     snprintf(date, sizeof(date), "%02u/%02u/20%02u", p_ticket->rtc_array[2], p_ticket->rtc_array[1], p_ticket->rtc_array[0]);
     snprintf(hour, sizeof(hour), "%02u:%02u:%02u", p_ticket->rtc_array[4], p_ticket->rtc_array[5], p_ticket->rtc_array[6]);
-    snprintf(number, sizeof(number), "%05u\0", p_ticket->ticket_number);
+    snprintf(number, sizeof(number), "%05u", p_ticket->ticket_number);
     date[sizeof(date) - 1] = '\0';
     hour[sizeof(hour) - 1] = '\0';
     number[sizeof(number) - 1] = '\0';

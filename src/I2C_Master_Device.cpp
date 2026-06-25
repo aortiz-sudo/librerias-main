@@ -136,7 +136,7 @@ status I2C_Master_Device::burn_firmware(File *p_file, size_t p_file_size)
         return set_status(TIMEOUT_ERROR);
     }
 
-    set_address(this->m_address + 0x10);  // Asumimos que el bootloader responde en la dirección principal + 0x10
+    set_address(this->m_address + 0x10);  // Convención fija del diseño: el bootloader responde en (dirección principal + 0x10): display 0x31->0x41, impresora 0x30->0x40.
     
     uint8_t start_buffer[4];
     start_buffer[0] = I2C_START_FLASHING_CMD;  // 0x3E
@@ -373,7 +373,7 @@ status I2C_Master_Device::send_command(command_struct *p_command)
     return get_status();
 }
 
-// Función para calcular el CRC del firmware utilizando el algoritmo CRC-16-IBM (polinomio 0x8005)
+// Calcula el CRC del firmware: CRC-16-IBM/ANSI en forma reflejada (polinomio 0xA001, init 0xFFFF). Debe coincidir con el del bootloader del AVR.
 uint16_t I2C_Master_Device::calculate_firmware_crc(File *p_file, size_t p_file_size)
 {
     uint16_t crc = 0xFFFF;

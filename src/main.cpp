@@ -1010,10 +1010,13 @@ void calibrate(uint8_t *p_calibration_data, int args)
  * el volumen despachado o realizando todo el proceso de despacho y generación de ticket.
  * 
  * @param p_dispatch_volume Puntero al volumen despachado.
- * @param args              Argumentos que determinan la acción a realizar. 
- *                          0: Obtener volumen. 
- *                          1: Detener despacho 
- *                          2: Finalizar despacho.
+ * @param args              Acción a realizar:
+ *                          0: Iniciar despacho (enciende los relés) y leer el volumen inicial.
+ *                          1: Leer el volumen despachado.
+ *                          2: Detener el despacho (apaga los relés).
+ *                          3: Finalizar el despacho: incrementa el folio, genera el evento,
+ *                             guarda en SD, imprime el ticket, persiste el folio y reinicia el contador de pulsos.
+ *                          4: Reducir el caudal (patrón de relés intermedio) y leer el volumen.
  */
 void dispatch(uint8_t *p_dispatch_volume, int args)
 {
@@ -1066,7 +1069,7 @@ void dispatch(uint8_t *p_dispatch_volume, int args)
       print_ticket((uint8_t *)str_dispatch, 0);
   
       char str_ticket_number[10];
-      snprintf(str_ticket_number, sizeof(ticket_number), "%u", ticket_number);
+      snprintf(str_ticket_number, sizeof(str_ticket_number), "%u", ticket_number);
       str_ticket_number[sizeof(str_ticket_number) - 1] = '\0';
       build_sd_info(PARAMETERS_PATH, str_ticket_number, SAVE_GENERAL_PARAMETER, TICKET_NUMBER_POS);
 
@@ -2790,7 +2793,7 @@ void check_firmware_updates()
   xSemaphoreTake(http_mutex, portMAX_DELAY);
 
   char endpoint[128] = "";
-  snprintf(endpoint, sizeof(endpoint),"%s%s/versions.txt", branches_endpoint);
+  snprintf(endpoint, sizeof(endpoint), "%s/versions.txt", branches_endpoint);
   endpoint[sizeof(endpoint) - 1] = '\0';
   logger.logln(endpoint);
 
@@ -2865,6 +2868,14 @@ void check_firmware_updates()
   xSemaphoreGive(http_mutex);
 }
 
+/**
+ * @brief Dispara el flasheo del firmware descargado (display, impresora y ESP32).
+ *
+ * @note PENDIENTE: las pruebas de actualización OTA del ESP32 y de carga de firmware
+ *       a los ATmega a través de sus bootloaders están pospuestas. Por eso el cuerpo
+ *       de esta función está comentado. Para realizar dichas pruebas hay que
+ *       descomentar el bloque de abajo.
+ */
 void check_firmware_triggers()
 {
   /*if(trigger_fw_update[1])
