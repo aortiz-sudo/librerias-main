@@ -1,0 +1,70 @@
+name: Documentación Doxygen
+
+# Regenera la documentación y la publica en GitHub Pages en cada push a main.
+# El HTML nunca se comitea: docs/ sigue ignorado en .gitignore.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'include/**'
+      - 'Doxyfile'
+      - '.github/workflows/doxygen-pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Permite un solo despliegue a la vez, sin cancelar el que ya está en curso.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  DOXYGEN_VERSION: 1.17.0
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # HAVE_DOT = YES en el Doxyfile: se requiere graphviz para los diagramas.
+      - name: Instalar graphviz
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y graphviz
+
+      # Se usa el binario oficial en lugar del paquete de apt para que la salida
+      # coincida con la versión de desarrollo local (apt trae una más antigua).
+      - name: Instalar Doxygen ${{ env.DOXYGEN_VERSION }}
+        run: |
+          curl -fsSL -o doxygen.tar.gz \
+            "https://github.com/doxygen/doxygen/releases/download/Release_${DOXYGEN_VERSION//./_}/doxygen-${DOXYGEN_VERSION}.linux.bin.tar.gz"
+          tar -xzf doxygen.tar.gz
+          echo "$PWD/doxygen-${DOXYGEN_VERSION}/bin" >> "$GITHUB_PATH"
+
+      - name: Generar documentación
+        run: |
+          doxygen --version
+          doxygen Doxyfile
+          test -f docs/html/index.html || { echo "::error::Doxygen no generó docs/html/index.html"; exit 1; }
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/html
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
