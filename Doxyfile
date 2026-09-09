@@ -85,7 +85,13 @@ GENERATE_LATEX         = NO
 HAVE_DOT               = YES
 CLASS_GRAPH            = YES
 COLLABORATION_GRAPH    = YES
-CALL_GRAPH             = NO
-CALLER_GRAPH           = NO
+# Notacion UML: muestra atributos y metodos dentro de cada caja.
+UML_LOOK               = YES
+# NO = solo nombres de miembros, sin tipos ni parametros (cajas compactas).
+DOT_UML_DETAILS        = NO
+CALL_GRAPH             = YES
+CALLER_GRAPH           = YES
+# Trunca los grafos muy densos para que sigan siendo legibles.
+DOT_GRAPH_MAX_NODES    = 50
 DOT_IMAGE_FORMAT       = svg
 INTERACTIVE_SVG        = YES
