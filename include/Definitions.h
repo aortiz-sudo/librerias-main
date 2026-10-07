@@ -134,9 +134,36 @@
 /*-----------  Direcciones para la manipualcion de los datos mostrados en la pantalla  -----------*/
 /**
  * \def   DISPLAY_RTC_ADDRESS
- * \brief Dirección de memoria para la fecha y hora en la pantalla.
+ * \brief Registro RTC de la pantalla: LECTURA de la fecha y hora.
+ *
+ * Formato (4 words / 8 bytes): D7=Anio, D6=Mes, D5=Dia, D4=Semana, D3=Hora,
+ * D2=Minuto, D1=Segundo, D0=sin usar. Los valores son BINARIOS, NO BCD
+ * (p. ej. anio 2026 -> 0x1A, octubre -> 0x0A).
+ *
+ * \warning Escribir aqui solo funciona en pantallas SIN RTC de hardware
+ *          ("Without RTC on hardware, user can write RTC data", T5L DGUSII
+ *          Application Development Guide, seccion 7.1). En las pantallas que
+ *          SI traen RTC con supercapacitor, el nucleo de la GUI reescribe
+ *          este registro desde el RTC interno en cada refresco, por lo que la
+ *          escritura del MCU se pierde y se produce parpadeo. Para fijar la
+ *          hora en ese hardware hay que usar \ref DISPLAY_RTC_SET_ADDRESS.
  */
 #define DISPLAY_RTC_ADDRESS                 (uint16_t)0x0010
+/**
+ * \def   DISPLAY_RTC_SET_ADDRESS
+ * \brief Registro RTC_Set de la pantalla: AJUSTE del RTC interno.
+ *
+ * Registro de solo escritura, 4 words (8 bytes), que requiere RTC de hardware:
+ * D7:D6 = 0x5AA5 (dispara el ajuste una vez), D5:D0 = anio, mes, dia, hora,
+ * minuto, segundo en formato binario (NO BCD) y SIN byte de dia de la semana
+ * (DGUS lo calcula automaticamente).
+ *
+ * Ejemplo oficial para 2050-10-01 11:12:13:
+ * \code
+ * 5A A5 0B 82 00 9C 5A A5 32 0A 01 0B 0C 0D
+ * \endcode
+ */
+#define DISPLAY_RTC_SET_ADDRESS             (uint16_t)0x009C
 /**
  * \def   DISPLAY_PASSWORD_ADDRESS
  * \brief Dirección de memoria para la contraseña en la pantalla.
@@ -522,6 +549,11 @@
  */
 #define SET_CRC_FALSE_CMD           (uint16_t)0x5A00
 /**
+ * \def   ENABLE_RTC_SET_CMD
+ * \brief Valor que dispara una vez el ajuste del RTC interno (registro RTC_Set).
+ */
+#define ENABLE_RTC_SET_CMD          (uint16_t)0x5AA5
+/**
  * \def   ENABLE_PAGE_SWITCH_CMD
  * \brief Comando para habilitar el cambio de página.
  */
@@ -548,6 +580,11 @@
  * \brief Dirección de registro para configuración RTC.
  */
 #define RTC_CONFIG_REG              (uint16_t)0x0010
+/**
+ * \def   RTC_SET_REG
+ * \brief Registro para ajustar el RTC interno. Ver \ref DISPLAY_RTC_SET_ADDRESS.
+ */
+#define RTC_SET_REG                 (uint16_t)0x009C
 /**
  * \def   PIC_NOW_REG
  * \brief Dirección de registro para la imagen actual.

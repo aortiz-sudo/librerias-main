@@ -68,15 +68,25 @@ class Display : public UART_Device
         status set_CRC(bool p_set_crc);
 
         /**
-         * \brief       Función para cambiar el reloj RTC de la pantalla.      
-         * \param p_rtc Buffer que contiene los datos del RTC. 
+         * \brief       Ajusta el RTC interno de la pantalla (registro RTC_Set, 0x009C).
+         *
+         *              Requiere que la pantalla tenga RTC de hardware. Es un ajuste
+         *              puntual: tras enviarlo la pantalla mantiene la hora por si
+         *              misma, por lo que NO debe llamarse de forma periodica. Para
+         *              pintar la hora usa el control "Text RTC" de DGUS, que lee
+         *              el RTC interno.
+         *
+         * \param p_rtc Buffer de 6 bytes con valores BINARIOS (no BCD) en el orden
+         *              anio (0-99), mes (1-12), dia (1-31), hora (0-23), minuto
+         *              (0-59), segundo (0-59). El dia de la semana no se envia:
+         *              DGUS lo calcula automaticamente.
          * \returns     Estado del comando enviado.
          */
         status set_RTC(const uint8_t *p_rtc);
 
         /**
-         * \brief   Función para obtener los datos del reloj RTC de la pantalla.
-         * \returns Buffer con los datos del reloj RTC.
+         * \brief   Lee el reloj RTC de la pantalla (registro 0x0010).
+         * \returns Buffer de 7 bytes: anio, mes, dia, semana, hora, minuto, segundo.
          */
         uint8_t *get_RTC();
 

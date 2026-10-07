@@ -109,12 +109,18 @@ status Display::set_CRC(bool p_set_crc)
 
 status Display::set_RTC(const uint8_t *p_rtc)
 {
+    // Se escribe en RTC_Set (0x009C), no en el registro de lectura 0x0010:
+    // en las pantallas con RTC de hardware el nucleo de la GUI reescribe 0x0010
+    // desde el RTC interno en cada refresco y la escritura del MCU se pierde.
+    // Trama resultante: 5A A5 0B 82 00 9C 5A A5 AA MM DD hh mm ss
     uint8_t data[] =
     {
-        (uint8_t)(RTC_CONFIG_REG >> 8),
-        (uint8_t)(RTC_CONFIG_REG & 0xFF), 
-        p_rtc[0], p_rtc[1], p_rtc[2], p_rtc[3],
-        p_rtc[4], p_rtc[5], p_rtc[6], 0x00
+        (uint8_t)(RTC_SET_REG >> 8),
+        (uint8_t)(RTC_SET_REG & 0xFF),
+        (uint8_t)(ENABLE_RTC_SET_CMD >> 8),
+        (uint8_t)(ENABLE_RTC_SET_CMD & 0xFF),
+        p_rtc[0], p_rtc[1], p_rtc[2],
+        p_rtc[3], p_rtc[4], p_rtc[5]
     };
 
     command_struct command;

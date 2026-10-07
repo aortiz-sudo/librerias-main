@@ -126,6 +126,8 @@ static int8_t lls_temp = 0;
 static uint8_t rtc_data[7] = { 0 };
 /// Último día leído del RTC.
 static uint8_t last_rtc_day;
+/// Último día en el que se sincronizó el RTC interno de la pantalla.
+static uint8_t last_display_rtc_sync_day = 0xFF;
 /// Voltaje de la batería.
 static float voltage = 12.0;
 /// Estado de gabinete abierto.
@@ -316,6 +318,8 @@ void manage_screen(char p_key);
 void show_variables();
 /** @brief Actualiza la fecha y hora mostradas en la pantalla. @param p_display_write true para escribir en la pantalla. */
 void update_display_rtc(bool p_display_write = true);
+/** @brief Sincroniza el RTC interno de la pantalla con el RTC del sistema (escritura puntual). */
+void sync_display_rtc();
 /** @brief Carga los parámetros generales desde la tarjeta SD. */
 void config_parameters();
 /** @brief Carga los usuarios registrados desde la tarjeta SD. */
@@ -694,7 +698,16 @@ void Screen_Task(void *pvParameters)
     unsigned long now = millis();
     if(now - last_rtc_update >= 500)
     {
-      update_display_rtc();
+      // Solo se refresca rtc_data (tickets, JSON, logs). La pantalla pinta la
+      // hora desde su propio RTC de hardware, por lo que NO se le escribe en
+      // cada ciclo: hacerlo competía con el RTC interno y causaba parpadeo.
+      update_display_rtc(false);
+
+      // Resincronización puntual una vez al día, para corregir la deriva entre
+      // el DS3231 y el RTC interno de la pantalla.
+      if(last_display_rtc_sync_day != rtc_data[RTC_DAY_INDEX])
+        sync_display_rtc();
+
       last_rtc_update = now;
     }
 
@@ -1364,7 +1377,37 @@ void update_display_rtc(bool p_display_write)
   rtc_data[RTC_SECOND_INDEX] = rtc.getSecond();
 
   if(p_display_write)
-    display_status = screen->write_to_address(DISPLAY_RTC_ADDRESS, rtc_data, sizeof(rtc_data));
+    sync_display_rtc();
+}
+
+/**
+ * @brief Sincroniza el RTC interno de la pantalla con el RTC del sistema.
+ *
+ * Escribe en el registro RTC_Set (0x009C) de la pantalla, que ajusta su RTC de
+ * hardware una sola vez. A partir de ese momento la pantalla mantiene la hora
+ * por sí misma (supercapacitor) y el control "Text RTC" de DGUS la pinta sin
+ * intervención del MCU.
+ *
+ * Es deliberadamente una operación PUNTUAL: no debe llamarse de forma periodica.
+ * Antes se escribía cada 500 ms en el registro de lectura 0x0010, que el núcleo
+ * de la GUI reescribe desde el RTC de hardware en cada refresco; esa carrera era
+ * la causa del parpadeo entre la hora enviada y la del RTC interno.
+ *
+ * Formato (4 words / 8 bytes): 0x5AA5 + año, mes, día, hora, minuto, segundo,
+ * en valores BINARIOS (no BCD) y sin byte de día de la semana, que DGUS calcula.
+ * Trama: 5A A5 0B 82 00 9C 5A A5 AA MM DD hh mm ss
+ */
+void sync_display_rtc()
+{
+  uint8_t rtc_set[] =
+  {
+    (uint8_t)(ENABLE_RTC_SET_CMD >> 8), (uint8_t)(ENABLE_RTC_SET_CMD & 0xFF),
+    rtc_data[RTC_YEAR_INDEX], rtc_data[RTC_MONTH_INDEX], rtc_data[RTC_DAY_INDEX],
+    rtc_data[RTC_HOUR_INDEX], rtc_data[RTC_MINUTE_INDEX], rtc_data[RTC_SECOND_INDEX]
+  };
+
+  display_status = screen->write_to_address(DISPLAY_RTC_SET_ADDRESS, rtc_set, sizeof(rtc_set));
+  last_display_rtc_sync_day = rtc_data[RTC_DAY_INDEX];
 }
 
 /**
