@@ -46,6 +46,13 @@ size_t get_substring(const char *p_string, char *p_substring, char p_terminator,
 */
 size_t split_string(const char *p_src, char p_dest[][STRING_BUFFER], size_t p_dest_size, char p_delim);
 
+/**
+ * \brief           Quita los espacios, tabuladores y saltos de línea (\r, \n) al final de una cadena.
+ *
+ * \param p_string  Cadena a recortar (se modifica en su lugar).
+*/
+void trim_trailing_whitespace(char *p_string);
+
 /** 
  * \brief           Función para obtener el número de líneas en una cadena de caracteres.
  * 

@@ -175,27 +175,62 @@ int Ethernet_HTTP::download_content(Stream *p_stream)
         return -2;
     }
 
-    int byte_counter = 0;
+    // Sin Content-Length no hay forma de saber si el archivo llegó completo.
     size_t file_size = atoi((const char *)&content_length_value[0]);
-    uint8_t buffer[128] = { 0 };
 
-    while(this->m_global_client->connected() && byte_counter < file_size)
+    if(file_size == 0)
     {
-        while(this->m_global_client->available())
+        logger.logln("La respuesta no trae Content-Length.");
+        this->m_global_client->stop();
+        return HTTP_ERROR_NO_STREAM;
+    }
+
+    // Mismo esquema que get_data_from_server(): espera con pausa y timeout. Antes
+    // el ciclo giraba sin pausa mientras no llegaban datos y no tenía límite de tiempo.
+    size_t byte_counter = 0;
+    uint8_t buffer[128] = { 0 };
+    unsigned long last_data_millis = millis();
+
+    while(byte_counter < file_size && (this->m_global_client->connected() || this->m_global_client->available()))
+    {
+        if(this->m_global_client->available())
         {
-            int len = this->m_global_client->read(buffer, sizeof(buffer));
+            size_t to_read = file_size - byte_counter < sizeof(buffer) ? file_size - byte_counter : sizeof(buffer);
+            int len = this->m_global_client->read(buffer, to_read);
 
             if(len > 0)
             {
-                p_stream->write(buffer, len);
+                if(p_stream->write(buffer, len) != (size_t)len)
+                {
+                    logger.logln("No se pudo escribir el firmware en la SD.");
+                    this->m_global_client->stop();
+                    return HTTP_ERROR_NO_STREAM;
+                }
+
                 byte_counter += len;
+                last_data_millis = millis();
+                continue;
             }
-            else
-                vTaskDelay(1 / portTICK_PERIOD_MS);
         }
+
+        if(millis() - last_data_millis > HTTP_BODY_TIMEOUT_MS)
+            break;
+
+        vTaskDelay(1 / portTICK_PERIOD_MS);
     }
 
     this->m_global_client->stop();
 
-    return byte_counter;
+    // Una descarga incompleta no debe pasar como buena: se guardaría la versión como
+    // instalada y ya no se reintentaría.
+    if(byte_counter != file_size)
+    {
+        logger.log("Descarga incompleta: ");
+        logger.log(byte_counter);
+        logger.log(" de ");
+        logger.logln(file_size);
+        return HTTP_ERROR_READ_TIMEOUT;
+    }
+
+    return (int)byte_counter;
 }

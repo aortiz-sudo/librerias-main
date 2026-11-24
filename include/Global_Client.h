@@ -188,6 +188,16 @@ class Global_Client
         }
 
         /**
+         * \brief           Establece la hora (UNIX epoch, UTC) con la que se valida la vigencia del certificado del servidor.
+         * \param p_epoch   Segundos desde 1970. Con 0, la librería usa time(nullptr), que en el ESP32
+         *                  sin sincronizar regresa el tiempo desde el arranque y hace fallar la validación.
+         */
+        inline void set_x509_time(uint32_t p_epoch)
+        {
+            this->m_x509_time = p_epoch;
+        }
+
+        /**
          * \brief   Detiene la conexión con el servidor y libera el cliente.
          */
         virtual inline void client_stop()
@@ -207,6 +217,7 @@ class Global_Client
         client_type m_type;                         ///< Tipo de cliente.
         bool m_secure = false;                      ///< Indica si la conexión es segura (SSL).
         char *m_certificate = nullptr;              ///< Certificado SSL.
+        uint32_t m_x509_time = 0;                   ///< Hora para validar el certificado (0 = la de la librería).
 
         char *m_header[MAX_HTTP_HEADERS] =          ///< Encabezados personalizados.
         { 

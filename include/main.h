@@ -309,9 +309,12 @@ extern "C"
 #define PRODUCT_SIZE        (uint8_t)0x10
 /**
 * \def GITHUB_TOKEN_SIZE
-*  \brief Tamaño máximo del token de github.
+*  \brief Tamaño máximo del token de github (incluye el nulo final).
+*
+*  Alcanza para un token fine-grained (`github_pat_...`, 93 caracteres). Las líneas
+*  de /github.txt se leen con buffers de 128 bytes, así que no tiene caso hacerlo mayor.
 */
-#define GITHUB_TOKEN_SIZE   (uint8_t)0x30
+#define GITHUB_TOKEN_SIZE   (uint8_t)0x80
 /**
  * \def   TICKET_NUMBER_SIZE
  * \brief Tamaño máximo para el número de ticket.

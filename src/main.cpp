@@ -7,6 +7,8 @@
  */
 
 #include "main.h"
+#include "github_ca.h"
+#include <time.h>
 
 //========================= Variables Globales =========================//
 
@@ -356,11 +358,25 @@ static const uint8_t github_param_sizes[] = { GITHUB_TOKEN_SIZE, sizeof(current_
 /// Ruta a los archivos de firmware.
 static const char *firmware_paths[3] = { ESP32_FW_PATH, DISPLAY_FW_PATH, PRINTER_FW_PATH };
 
+/// Host de la API de GitHub. Se resuelve por DNS y el nombre también se usa para SNI y para validar el certificado.
+static const char *github_api_host = "api.github.com";
+
 /// Endpoint para descargar los archivos de firmware desde Github.
 static const char *branches_endpoint = "/repos/aortiz-sudo/firmware_repository/contents";
-static const char *firmwares_endpoints[3] = { "/.pio/build/esp32_release/firmware.bin", 
-                                              "/.pio/build/display_release/display.bin", 
+
+/// Entorno de PlatformIO cuyo binario del ESP32 corresponde a esta variante de pantalla (ver platformio.ini).
+#if DISPLAY_HAS_INTERNAL_RTC
+  #define ESP32_FW_ENV "esp32_release"
+#else
+  #define ESP32_FW_ENV "esp32_release_legacy"
+#endif
+
+static const char *firmwares_endpoints[3] = { "/.pio/build/" ESP32_FW_ENV "/firmware.bin",
+                                              "/.pio/build/display_release/display.bin",
                                               "/.pio/build/printer_release/printer.bin" };
+
+/// Prefijo del tag de cada componente en firmware_repository: la versión X del ESP32 está en el tag "esp32-X".
+static const char *firmware_tag_prefixes[3] = { "esp32-", "display-", "printer-" };
 static char api_key[72];
 static char ca_cert[CA_CERT_SIZE] = { 0 };
 static char data_endpoint[32] = "/api/data/";
@@ -4156,11 +4172,113 @@ void update_product(const char *p_payload)
 }
 
 /**
+ * @brief Convierte la hora del DS3231 (rtc_data) a UNIX epoch.
+ *
+ * Sin TZ configurada, mktime() interpreta la hora como UTC. El desfase con la hora
+ * local (unas horas) no importa para revisar la vigencia de un certificado.
+ *
+ * @return Segundos desde 1970, o 0 si el RTC no tiene una hora válida.
+ */
+static uint32_t rtc_epoch()
+{
+  struct tm t = {};
+  t.tm_year = 100 + rtc_data[RTC_YEAR_INDEX];   // El DS3231 guarda el año en dos dígitos (20yy).
+  t.tm_mon = rtc_data[RTC_MONTH_INDEX] - 1;
+  t.tm_mday = rtc_data[RTC_DAY_INDEX];
+  t.tm_hour = rtc_data[RTC_HOUR_INDEX];
+  t.tm_min = rtc_data[RTC_MINUTE_INDEX];
+  t.tm_sec = rtc_data[RTC_SECOND_INDEX];
+
+  time_t epoch = mktime(&t);
+
+  if(epoch < (time_t)ESP_SSLCLIENT_VALID_TIMESTAMP)
+    return 0;
+
+  return (uint32_t)epoch;
+}
+
+/**
+ * @brief Prepara http_client para una petición a la API de GitHub.
+ *
+ * Usa las raíces de GitHub (no el certificado de la plataforma) y la hora del RTC
+ * para validar el certificado. Requiere http_mutex tomado y siempre debe cerrarse
+ * con end_github_request(), aunque regrese false.
+ *
+ * @param p_auth_value  Buffer para el header Authorization; debe existir hasta terminar la petición.
+ * @param p_auth_size   Tamaño de p_auth_value.
+ * @return false si el RTC no tiene una hora válida (sin ella no se puede validar el certificado).
+ */
+static bool begin_github_request(char *p_auth_value, size_t p_auth_size)
+{
+  uint32_t now = rtc_epoch();
+
+  if(now == 0)
+  {
+    logger.logln("RTC sin hora valida: no se puede validar el certificado de GitHub.");
+    return false;
+  }
+
+  snprintf(p_auth_value, p_auth_size, "Bearer %s", github_token);
+
+  http_client->set_server(github_api_host);
+  http_client->set_port(443);
+  http_client->set_secure(true);
+  http_client->set_certificate(GITHUB_CA_BUNDLE);
+  http_client->set_x509_time(now);
+  http_client->set_header("Host", github_api_host, 0);
+  http_client->set_header("Accept", "application/vnd.github.raw", 1);
+  http_client->set_header("Authorization", (const char *)p_auth_value, 2);
+  http_client->set_header("User-Agent", "desarrolloidt", 3);
+  http_client->set_header("X-GitHub-Api-Version", "2022-11-28", 4);
+
+  return true;
+}
+
+/**
+ * @brief Regresa http_client a la configuración de la plataforma después de una petición a GitHub.
+ *
+ * Requiere http_mutex tomado. Las funciones de la plataforma fijan servidor, puerto y
+ * headers en cada petición, pero el certificado solo se fija al iniciar HTTP_Task.
+ */
+static void end_github_request()
+{
+  http_client->flush_headers();
+  http_client->set_certificate(ca_cert[0] != '\0' ? ca_cert : nullptr);
+  http_client->set_x509_time(0);
+}
+
+/**
+ * @brief Arma el endpoint de la API de GitHub para descargar el binario de un componente.
+ *
+ * @param p_endpoint    Buffer de salida.
+ * @param p_size        Tamaño de p_endpoint.
+ * @param p_component   0: ESP32, 1: display, 2: impresora.
+ * @param p_version     Versión sin prefijo (p. ej. "1.1.0"); el tag es <prefijo><versión>.
+ * @return false si el endpoint no cabe en el buffer.
+ */
+static bool build_firmware_endpoint(char *p_endpoint, size_t p_size, uint8_t p_component, const char *p_version)
+{
+  int written = snprintf(p_endpoint, p_size, "%s%s?ref=%s%s", branches_endpoint, firmwares_endpoints[p_component],
+                         firmware_tag_prefixes[p_component], p_version);
+
+  if(written < 0 || (size_t)written >= p_size)
+  {
+    logger.logln("El endpoint del firmware no cabe en el buffer.");
+    return false;
+  }
+
+  return true;
+}
+
+/**
  * @brief Actualiza el firmware del dispositivo.
- * 
+ *
  * Esta función es llamada cuando se recibe un mensaje por WebSocket con la versión
  * del firmware a actualizar. Descarga el firmware desde GitHub y lo guarda en la tarjeta SD.
- * 
+ *
+ * Se ejecuta como callback dentro de handle_message(), que ya tiene tomado http_mutex.
+ * Por eso no lo toma: el mutex no es recursivo y tomarlo otra vez bloqueaba la tarea.
+ *
  * \param p_payload Puntero a la carga útil del mensaje WebSocket con los datos del firmware.
  */
 void update_firmware(const char *p_payload)
@@ -4172,55 +4290,56 @@ void update_firmware(const char *p_payload)
 
   char version[32] = "";
   get_json_key_value(&keys, &values, "version", version, 1);
+  trim_trailing_whitespace(version);
 
   logger.logln(version);
 
-  char endpoint[128] = "";
-  snprintf(endpoint, sizeof(endpoint), "%s%s?ref=%s", branches_endpoint, firmwares_endpoints[0], version);
-  endpoint[sizeof(endpoint) - 1] = '\0';
-  logger.logln(endpoint);
-  char auth_value[64] = "";
-  snprintf(auth_value, sizeof(auth_value),"Bearer %s", github_token);
-  auth_value[sizeof(auth_value) - 1] = '\0';
+  // La versión se guarda con el tamaño de current_esp32_fw_v: una más larga quedaría
+  // truncada y nunca coincidiría con la publicada.
+  if(version[0] == '\0' || strlen(version) >= sizeof(current_esp32_fw_v))
+  {
+    logger.logln("Version de firmware invalida.");
+    send_update_state(false);
+    return;
+  }
 
-  xSemaphoreTake(http_mutex, portMAX_DELAY);
-  http_client->set_port(443);
-  http_client->set_server("140.82.112.6");
-  http_client->set_secure(true);
-  http_client->set_header("Host", "api.github.com", 0);
-  http_client->set_header("Accept", "application/vnd.github.raw", 1);
-  http_client->set_header("Authorization", (const char *)auth_value, 2);
-  http_client->set_header("User-Agent", "desarrolloidt", 3);
-  http_client->set_header("X-GitHub-Api-Version", "2022-11-28", 4);
+  char endpoint[128] = "";
+
+  if(!build_firmware_endpoint(endpoint, sizeof(endpoint), 0, version))
+  {
+    send_update_state(false);
+    return;
+  }
+
+  logger.logln(endpoint);
 
   File file = SD.open(ESP32_FW_PATH, FILE_WRITE);
 
   if(!file)
   {
-    http_client->flush_headers();
     logger.logln("No se pudo abrir el archivo.");
-    file.close();
-    http_client->client_stop();
-    xSemaphoreGive(http_mutex);
-
     send_update_state(false);
     return;
   }
 
-  trigger_fw_update[0] = download_firmware(&file, endpoint);
+  char auth_value[sizeof("Bearer ") + GITHUB_TOKEN_SIZE] = "";
+  bool ready = begin_github_request(auth_value, sizeof(auth_value));
+
+  // Si la descarga falla, download_firmware() ya se lo reporta a la plataforma.
+  trigger_fw_update[0] = ready && download_firmware(&file, endpoint);
 
   file.close();
+  end_github_request();
 
-  http_client->flush_headers();
-
-  xSemaphoreGive(http_mutex);
+  if(!ready)
+    send_update_state(false);
 
   if(!trigger_fw_update[0])
     return;
 
-  strncpy((char *)github_parameters[1], (const char *)version, github_param_sizes[1]);
-  strncpy(current_esp32_fw_v, (const char *)version, sizeof(current_esp32_fw_v));
-  github_parameters[1][github_param_sizes[1] - 1] = '\0';
+  // github_parameters[1] apunta a current_esp32_fw_v.
+  strncpy(current_esp32_fw_v, (const char *)version, sizeof(current_esp32_fw_v) - 1);
+  current_esp32_fw_v[sizeof(current_esp32_fw_v) - 1] = '\0';
   const char *param[] = { github_parameters[1] };
   uint8_t pos = github_param_pos[1];
   save_parameter(GITHUB_PARAMETERS_PATH, param, &pos, 1);
@@ -4324,51 +4443,65 @@ void read_core_dump()
 void check_firmware_updates()
 {
   uint8_t buffer[32] = { 0 };
-  char auth_value[64] = "";
-  snprintf(auth_value,  sizeof(auth_value),"Bearer %s", github_token);
-  auth_value[sizeof(auth_value) - 1] = '\0';
+  char auth_value[sizeof("Bearer ") + GITHUB_TOKEN_SIZE] = "";
+  char endpoint[128] = "";
+
+  snprintf(endpoint, sizeof(endpoint), "%s/versions.txt", branches_endpoint);
+  logger.logln(endpoint);
 
   xSemaphoreTake(http_mutex, portMAX_DELAY);
 
-  char endpoint[128] = "";
-  snprintf(endpoint, sizeof(endpoint), "%s/versions.txt", branches_endpoint);
-  endpoint[sizeof(endpoint) - 1] = '\0';
-  logger.logln(endpoint);
+  if(!begin_github_request(auth_value, sizeof(auth_value)))
+  {
+    end_github_request();
+    xSemaphoreGive(http_mutex);
+    return;
+  }
 
   http_client->set_endpoint(endpoint);
-  http_client->set_port(443);
-  http_client->set_server("140.82.112.6");
-  http_client->set_secure(true);
-  http_client->set_header("Host", "api.github.com", 0);
-  http_client->set_header("Accept", "application/vnd.github.raw", 1);
-  http_client->set_header("Authorization", (const char *)auth_value, 2);
-  http_client->set_header("User-Agent", "desarrolloidt", 3);
-  http_client->set_header("X-GitHub-Api-Version", "2022-11-28", 4);
-  int size = http_client->get_data_from_server(buffer, 32);
+  int size = http_client->get_data_from_server(buffer, sizeof(buffer));
 
   if(size < 0)
   {
     logger.logln("No se pudo obtener información de Github.");
-    http_client->flush_headers();
+    end_github_request();
     xSemaphoreGive(http_mutex);
     return;
   }
 
   logger.logln((const char *)buffer);
 
-  char versions[3][64] = { 0 };
+  char versions[3][STRING_BUFFER] = { 0 };
 
-  split_string((const char *)buffer, versions, 3, ';');
+  if(split_string((const char *)buffer, versions, 3, ';') < 3)
+  {
+    logger.logln("versions.txt no tiene el formato esp32;display;impresora.");
+    end_github_request();
+    xSemaphoreGive(http_mutex);
+    return;
+  }
 
   for(int i = 0; i < 3; i++)
   {
+    // versions.txt puede terminar en salto de línea (\n o \r\n): sin recortarlo, la
+    // versión nunca coincide y la URL de la impresora queda con un salto de línea.
+    trim_trailing_whitespace(versions[i]);
     logger.logln(versions[i]);
+
+    if(versions[i][0] == '\0' || strlen(versions[i]) >= github_param_sizes[i + 1])
+    {
+      logger.logln("Version invalida en versions.txt.");
+      continue;
+    }
 
     if(strcmp((const char *)versions[i], github_parameters[i + 1]) == 0)
     {
       logger.logln("No hay nueva version de firmware disponible.");
       continue;
     }
+
+    if(!build_firmware_endpoint(endpoint, sizeof(endpoint), i, versions[i]))
+      continue;
 
     File file = SD.open(firmware_paths[i], FILE_WRITE);
 
@@ -4381,10 +4514,6 @@ void check_firmware_updates()
 
     logger.logln("Se encontró nueva version de firmware.");
     logger.logln("Descargando...");
-
-    snprintf(endpoint, sizeof(endpoint) , "%s%s?ref=%s", branches_endpoint, firmwares_endpoints[i], versions[i]);
-
-    endpoint[sizeof(endpoint) - 1] = '\0';
     logger.logln(endpoint);
 
     trigger_fw_update[i] = download_firmware(&file, endpoint);
@@ -4401,7 +4530,7 @@ void check_firmware_updates()
     save_parameter(GITHUB_PARAMETERS_PATH, param, &pos, 1);
   }
 
-  http_client->flush_headers();
+  end_github_request();
 
   xSemaphoreGive(http_mutex);
 }

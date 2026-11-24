@@ -17,6 +17,9 @@ bool Global_Client::connect_to_server()
         if(this->m_certificate != nullptr)
         {
             this->m_ssl_client.setCACert((const char *)this->m_certificate);
+            // Siempre se asigna: si quedara la hora de una conexión anterior, la
+            // validación usaría una fecha vieja.
+            this->m_ssl_client.setX509Time(this->m_x509_time);
             logger.logln("Certificado SSL establecido.");
         }
         else

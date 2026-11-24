@@ -109,7 +109,8 @@ Los tres firmwares **comparten un único directorio `src/`**. Cada objetivo de c
 ├── lib/                    # Librerías incluidas en el repositorio (ESP_SSLClient, jsmn)
 ├── test/                   # Pruebas
 ├── docs/                   # Documentación HTML generada por Doxygen (no versionada)
-├── firmware_repository/    # Repositorio con los binarios para OTA
+├── firmware_repository/    # Clone de aortiz-sudo/firmware_repository con los binarios OTA (ignorado por git)
+├── scripts/                # avr_bin.py (genera display.bin/printer.bin) y publish_firmware.py (publica la OTA)
 ├── partitions.csv          # Esquema de particiones de la ESP32 (con OTA y coredump)
 ├── platformio.ini          # Configuración de entornos de compilación
 ├── Doxyfile                # Configuración de Doxygen
@@ -179,7 +180,7 @@ El ESP32 lee su configuración desde la tarjeta SD al arrancar. Los archivos pri
 | `/usuarios.txt`         | Usuarios registrados.                                                          |
 | `/Eventos.txt`          | Eventos pendientes de envío al servidor.                                       |
 | `/Despachos.txt`        | Historial de despachos para reimpresión de tickets.                            |
-| `/github.txt`           | Token y versiones para la actualización OTA.                                   |
+| `/github.txt`           | Línea 1: token de GitHub. Líneas 2-4: versiones instaladas (ESP32, display, impresora). Ver [OTA](#actualización-de-firmware-ota). |
 | `/api-key.txt`          | Clave de API.                                                                  |
 | `/ca-cert.pem`          | Certificado raíz (CA) para las conexiones TLS.                                 |
 | `/backups/`             | Respaldos de los archivos anteriores.                                          |
@@ -208,10 +209,52 @@ Ejemplos de comandos I2C: imprimir ticket, cambiar imagen de la pantalla, ajusta
 
 El sistema puede actualizar los tres firmwares de forma remota:
 
-1. El ESP32 consulta el repositorio de firmware en GitHub (token y versiones en `/github.txt`) y compara con `versions.txt` (formato `esp32;display;printer`).
-2. Si hay una versión nueva, descarga el `.bin` correspondiente y lo guarda en `/firmwares/` de la SD.
+1. El ESP32 lee `versions.txt` de la rama `main` del repo privado [`aortiz-sudo/firmware_repository`](https://github.com/aortiz-sudo/firmware_repository) (formato `esp32;display;impresora`, sin salto de línea final) y lo compara con las versiones instaladas, guardadas en `/github.txt`.
+2. Si una versión cambió, descarga ese binario desde el **tag del componente** y lo guarda en `/firmwares/` de la SD.
 3. **ESP32:** se actualiza a sí mismo usando el esquema de particiones OTA (`partitions.csv`, `app0`/`app1`).
 4. **ATmega (pantalla/impresora):** el ESP32 los reprograma por I2C a través de su bootloader, enviando el firmware página por página y verificando con CRC (comandos `I2C_START_FLASHING_CMD`, `I2C_FLASH_TO_ADDRESS_CMD`, `I2C_CRC_CMD`, `I2C_START_APPLICATION_CMD`).
+
+La plataforma también puede pedir una versión del ESP32 con el evento WebSocket `actualizacionFirmware` y el payload `{"version":"1.1.0"}` (sin prefijo).
+
+> El flasheo (`check_firmware_triggers()`) y la revisión diaria de las 04:00 siguen desactivados mientras se terminan las pruebas. Hoy solo se descarga.
+
+### Tags y rutas en `firmware_repository`
+
+Cada componente tiene su propio número de versión. El binario de la versión `X` está en el tag `<componente>-X`:
+
+| Componente | Tag           | Ruta en el repo                                                   |
+|------------|---------------|-------------------------------------------------------------------|
+| ESP32      | `esp32-X`     | `.pio/build/esp32_release/firmware.bin` (pantalla con RTC)        |
+|            |               | `.pio/build/esp32_release_legacy/firmware.bin` (pantalla anterior) |
+| Display    | `display-X`   | `.pio/build/display_release/display.bin`                          |
+| Impresora  | `printer-X`   | `.pio/build/printer_release/printer.bin`                          |
+
+Cada build del ESP32 descarga la ruta de su propia variante (`DISPLAY_HAS_INTERNAL_RTC`): un equipo con pantalla anterior nunca recibe el firmware de la pantalla nueva. Las descargas van a `api.github.com` por HTTPS y validan el certificado con las raíces de `include/github_ca.h` y la hora del DS3231. Si el RTC no tiene una hora válida, la descarga no se intenta.
+
+### Token de GitHub
+
+El repo es privado, así que cada equipo necesita un token en la línea 1 de `/github.txt` (y de `/backups/github.txt`). Usa un token **fine-grained** con estos datos: dueño `aortiz-sudo`, acceso *Only select repositories* → `firmware_repository` y permiso *Contents: Read-only*. El firmware acepta hasta 126 caracteres; uno fine-grained mide 93. El token queda en texto plano en la SD; con estos permisos, si se filtra solo da lectura a los binarios. Anota la fecha de vencimiento: cuando vence, la OTA deja de funcionar y cambiarlo requiere editar la SD.
+
+### Publicar una versión
+
+1. Haz commit de los cambios del firmware en este repo. El script se niega a publicar si hay cambios sin commitear, porque el binario no correspondería a ningún commit.
+2. Clona el repo de binarios dentro del proyecto (está en `.gitignore`):
+   ```bash
+   git clone https://github.com/aortiz-sudo/firmware_repository.git firmware_repository
+   ```
+3. Publica solo los componentes que cambiaron:
+   ```bash
+   python scripts/publish_firmware.py publish --esp32 1.1.1 --push
+   python scripts/publish_firmware.py publish --esp32 1.2.0 --display 1.2.0 --printer 1.2.0 --push
+   ```
+   El script hace un build limpio de los entornos `*_release` (incluida la variante legacy del ESP32) y valida los binarios. Después los copia, reescribe `versions.txt`, hace un commit con el `git describe` de la fuente y los SHA-256, crea los tags anotados y sube todo con un push atómico. Sin `--push`, todo queda local.
+4. Verifica lo publicado con el mismo token que usan los equipos:
+   ```bash
+   GITHUB_TOKEN=<token> python scripts/publish_firmware.py verify
+   ```
+   Descarga cada binario con las mismas URLs que arma el firmware y compara el HTTP 200, `Content-Length` y SHA-256 con el tag.
+
+Los `.bin` de los ATmega los genera `scripts/avr_bin.py` al compilar (`avr-objcopy -O binary`). Es la imagen cruda desde la dirección 0 que espera el bootloader I2C.
 
 ---
 

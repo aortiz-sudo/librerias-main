@@ -32,6 +32,15 @@ size_t split_string(const char *p_src, char p_dest[][STRING_BUFFER], size_t p_de
   return counter;
 }
 
+void trim_trailing_whitespace(char *p_string)
+{
+  size_t len = strlen(p_string);
+
+  while(len > 0 && (p_string[len - 1] == ' ' || p_string[len - 1] == '\t' ||
+                    p_string[len - 1] == '\r' || p_string[len - 1] == '\n'))
+    p_string[--len] = '\0';
+}
+
 size_t get_substring(const char *p_string, char *p_substring, char p_terminator, size_t p_buffer_size)
 {
   size_t count = 0;
