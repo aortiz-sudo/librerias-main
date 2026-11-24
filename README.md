@@ -231,8 +231,10 @@ El bootloader I2C de los dos ATmega328PB está en [bootloader/](bootloader/), un
 
 Códigos de estado: `1` tamaño inválido, `2` dirección inválida, `3` fallo de escritura, `4` CRC distinto, `5` timeout, `6` desborde de buffer y `7` sin app (en reposo).
 
+- **Con app válida**, después de cada reinicio el bootloader espera **1 s** a que el ESP32 empiece a flashear (`burn_firmware()` lo busca 20 ms después de mandar el reinicio) y luego arranca la app. La arranca con un reinicio por watchdog y una marca en RAM (`.noinit`), no con un salto directo: así la app empieza con todos los periféricos en su estado de reset. Con el salto directo, la app del display no arrancaba.
 - **Sin app** (flasheo cortado, o recién grabado por ISP), el bootloader no la arranca y espera al ESP32. Con la pantalla en reposo, el ESP32 revisa cada 60 s (hasta 3 veces por arranque) si algún ATmega responde `7`. Si es así, lo flashea con el binario de `/firmwares/`.
 - Si el ESP32 deja de mandar a mitad del flasheo, a los 10 s el bootloader se reinicia y espera sin app.
+- La app del display se reinicia sola por su watchdog si pasa ~1 s sin transmitir a la pantalla. Cada uno de esos reinicios la deja ~1 s sin responder (la ventana del bootloader).
 
 **Grabarlo por ISP (USBasp), una sola vez por ATmega:**
 
@@ -241,7 +243,9 @@ pio run -d bootloader -e bootloader_display -t fuses     # o bootloader_printer
 pio run -d bootloader -e bootloader_display -t upload
 ```
 
-> ⚠️ Grabar por ISP borra la flash completa, incluida la app; también cargar la app por USBasp borra el bootloader. Después de grabar el bootloader, la app se carga **desde el ESP32**: copia el binario a `/firmwares/display.bin` (o `printer.bin`) en la SD y el ESP32 lo recupera solo.
+Fusibles: `lfuse 0xE2`, `hfuse 0xD0` (BOOTRST activo, sección de arranque de 4 KB), `efuse 0xF7`. Las impresoras salieron de fábrica con `hfuse 0xD7`, que arranca directo en la app y nunca entra al bootloader; hay que cambiarlo a `0xD0`.
+
+> ⚠️ Grabar por ISP borra la flash completa, incluida la app; también cargar la app por USBasp borra el bootloader. Lo más práctico es grabar en una sola pasada la app y el bootloader juntos (un `.hex` con los dos, con `avrdude -e`), y verificar leyendo la flash. Si solo se graba el bootloader, la app se recupera desde el ESP32: copia el binario a `/firmwares/display.bin` (o `printer.bin`) en la SD.
 
 Los equipos con el bootloader anterior, o sin bootloader, no se pueden flashear por I2C. El intento falla sin daño: la app se reinicia sola en ~1 s y se reintenta en la siguiente revisión.
 
