@@ -188,6 +188,7 @@ int Ethernet_HTTP::download_content(Stream *p_stream)
     // Mismo esquema que get_data_from_server(): espera con pausa y timeout. Antes
     // el ciclo giraba sin pausa mientras no llegaban datos y no tenía límite de tiempo.
     size_t byte_counter = 0;
+    size_t reads = 0;
     uint8_t buffer[128] = { 0 };
     unsigned long last_data_millis = millis();
 
@@ -209,6 +210,12 @@ int Ethernet_HTTP::download_content(Stream *p_stream)
 
                 byte_counter += len;
                 last_data_millis = millis();
+
+                // Cede el CPU cada 32 lecturas (~4 KB): si los datos llegan sin
+                // pausa, la tarea IDLE no correría durante toda la descarga.
+                if(++reads % 32 == 0)
+                    vTaskDelay(1 / portTICK_PERIOD_MS);
+
                 continue;
             }
         }

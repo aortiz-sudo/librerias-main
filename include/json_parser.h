@@ -82,8 +82,11 @@ typedef struct
     char ticket_number[15];         ///< Folio del ticket.
     char quantity_dispatched[15];   ///< Cantidad despachada.
     char user_id[10];               ///< ID del usuario.
-    char *password;                 ///< Contraseña.
-    char *tag;                      ///< Tag RFID.
+    // La clave y el tag van copiados dentro del evento, no como punteros: la cola
+    // copia la estructura, y con punteros un evento que esperaba en ella (sin red)
+    // salía con el contenido del evento siguiente, o vacío ("clave":, = JSON inválido).
+    char password[8];               ///< Clave entre comillas ("1234") o null.
+    char tag[26];                   ///< Tag RFID entre comillas o null (mismo tamaño que str_tag).
 } json_event_struct;
 
 /**

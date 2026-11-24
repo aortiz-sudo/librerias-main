@@ -2866,10 +2866,13 @@ bool update_data(const char *p_json, const char *p_endpoint)
  */
 void trigger_event(json_event p_event, bool p_use_password, float p_quantity, bool p_use_tag)
 {
-  json_event_struct json_struct;
-  static char password[7] = "";
+  static_assert(sizeof(((json_event_struct *)nullptr)->tag) >= sizeof(str_tag),
+                "json_event_struct::tag debe poder guardar str_tag completo");
+  static_assert(sizeof(((json_event_struct *)nullptr)->password) >= USER_PSWD_SIZE + 2,
+                "json_event_struct::password debe poder guardar la clave entre comillas");
+
+  json_event_struct json_struct = {};
   static const char *null_text = "null";
-  memset(password, 0x00, 7);
 
   json_struct.fuel_level = lls_fuel_level;
   json_struct.fuel_temp = lls_temp;
@@ -2893,14 +2896,16 @@ void trigger_event(json_event p_event, bool p_use_password, float p_quantity, bo
   else
     strncpy(json_struct.ticket_number, null_text, sizeof(json_struct.ticket_number));
 
-  if(p_use_password)
-    snprintf(password, sizeof(password), "\"%s\"", active_password);
+  // Se copian al evento (ver json_event_struct). Antes se guardaba un puntero a un
+  // buffer estático que el siguiente evento borraba: un inicio de sesión que esperaba
+  // en la cola sin red se guardó como "clave":, y el servidor rechazaba el lote entero.
+  if(p_use_password && active_password != nullptr)
+    snprintf(json_struct.password, sizeof(json_struct.password), "\"%s\"", active_password);
+  else
+    snprintf(json_struct.password, sizeof(json_struct.password), "%s", null_text);
 
-  password[6] = '\0';
+  snprintf(json_struct.tag, sizeof(json_struct.tag), "%s", (p_use_tag && str_tag[0] != '\0') ? str_tag : null_text);
 
-  json_struct.tag = p_use_tag ? &str_tag[0] : (char *)null_text;
-  json_struct.password = p_use_password ? &password[0] : (char *)null_text;
-  
   if(p_use_password)
     snprintf(json_struct.user_id, sizeof(json_struct.user_id), "%u", user_ids[user_index]);
   else
@@ -2982,8 +2987,44 @@ void check_updates()
 }
 
 /**
+ * @brief Repara en su lugar los valores vacíos de un evento guardado ("clave":, -> "clave":null,).
+ *
+ * Las versiones anteriores podían guardar en /Eventos.txt eventos con la clave vacía
+ * (ver trigger_event()). Sin repararlos, el servidor rechaza el lote completo y los
+ * eventos válidos guardados con ellos ya nunca se envían.
+ *
+ * @param p_json  Fragmento JSON de un evento (se modifica).
+ * @param p_size  Tamaño del buffer de p_json.
+ * @return        Número de valores reparados, o -1 si la reparación no cabe en el buffer.
+ */
+static int repair_empty_json_values(char *p_json, size_t p_size)
+{
+  int repaired = 0;
+  char *p = p_json;
+
+  while((p = strchr(p, ':')) != nullptr)
+  {
+    if(p[1] != ',' && p[1] != '}')
+    {
+      p++;
+      continue;
+    }
+
+    if(strlen(p_json) + 4 >= p_size)
+      return -1;
+
+    memmove(p + 5, p + 1, strlen(p + 1) + 1);
+    memcpy(p + 1, "null", 4);
+    repaired++;
+    p += 5;
+  }
+
+  return repaired;
+}
+
+/**
  * @brief Envía los últimos eventos registrados en la cola al servidor.
- * 
+ *
  * Esta función se encarga de enviar en un solo paquete los últimos eventos registrados
  * en la cola de eventos del sistema. Intenta borrar los eventos enviados de la cola
  * para liberar espacio.
@@ -3003,6 +3044,16 @@ void send_last_events()
     logger.logln("No hay eventos en la cola.");
     http_client->flush_headers();
     return;
+  }
+
+  for(size_t i = 0; i < n_events; i++)
+  {
+    int repaired = repair_empty_json_values(events[i], sizeof(events[i]));
+
+    if(repaired > 0)
+      logger.logln("Evento guardado con valores vacios: se envia con null.");
+    else if(repaired < 0)
+      logger.logln("Evento guardado con valores vacios que no se pudieron reparar.");
   }
 
   logger.logln("Enviando ultimos eventos...");
