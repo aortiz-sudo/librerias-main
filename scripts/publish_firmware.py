@@ -143,6 +143,9 @@ def publish(args):
         raise PublishError("El proyecto tiene cambios sin commitear. Haz commit primero, "
                            "o usa --allow-dirty si de verdad quieres publicar así.")
     source_rev = git(PROJECT_ROOT, "describe", "--always", "--dirty", "--abbrev=12")
+    # Nombre del repo fuente según el remoto origin (p. ej. "librerias-main").
+    origin_url = git(PROJECT_ROOT, "remote", "get-url", "origin", check=False)
+    source_repo = origin_url.rstrip("/").split("/")[-1].removesuffix(".git") or "proyecto"
 
     # Estado del clone de firmware_repository.
     repo = Path(args.repo).resolve()
@@ -196,7 +199,7 @@ def publish(args):
 
     summary = ", ".join("{} {}".format(name, version) for name, version in requested.items())
     body = ["release: " + summary, "",
-            "Fuente: SMARTFUEL-GAS " + source_rev,
+            "Fuente: {} {}".format(source_repo, source_rev),
             "versions.txt: " + ";".join(versions), "", "SHA-256:"]
     body += ["  {}  {} bytes  {}".format(p, size, digest) for p, size, digest in published]
     if args.co_author:
@@ -205,7 +208,7 @@ def publish(args):
 
     for name, version in requested.items():
         tag = "{}{}".format(COMPONENTS[name]["prefix"], version)
-        git(repo, "tag", "-a", tag, "-m", "{} {} (fuente SMARTFUEL-GAS {})".format(name, version, source_rev))
+        git(repo, "tag", "-a", tag, "-m", "{} {} (fuente {} {})".format(name, version, source_repo, source_rev))
 
     commit = git(repo, "rev-parse", "--short", "HEAD")
     print("\nCommit {} en {}".format(commit, repo))
