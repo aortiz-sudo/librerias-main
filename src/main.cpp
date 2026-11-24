@@ -4709,9 +4709,9 @@ static constexpr uint8_t ATMEGA_RECOVERY_LIMIT = 3;
 static void apply_atmega_firmware(uint8_t p_component)
 {
   I2C_Master_Device *device = p_component == 1 ? (I2C_Master_Device *)screen : (I2C_Master_Device *)printer;
-  const char *name = p_component == 1 ? "display" : "impresora";
+  const char *name = p_component == 1 ? "del display" : "de la impresora";
 
-  logger.log("Flasheando el controlador del ");
+  logger.log("Flasheando el controlador ");
   logger.logln(name);
 
   suspend_tasks_for_flashing();
@@ -4735,7 +4735,7 @@ static void apply_atmega_firmware(uint8_t p_component)
     screen->request_pic_update();
   }
 
-  logger.log("Resultado del flasheo del ");
+  logger.log("Resultado del flasheo ");
   logger.log(name);
   logger.logln(result ? ": OK" : ": FALLO (se reintenta en la siguiente revision)");
 

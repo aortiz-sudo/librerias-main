@@ -12,6 +12,12 @@ bool Global_Client::connect_to_server()
     if(this->m_server == nullptr)
         return false;
 
+    // Cerrar la conexión anterior. ESP_SSLClient reutiliza el socket TCP si sigue abierto,
+    // aunque la nueva conexión sea a otro servidor: un POST a la plataforma deja la conexión
+    // abierta, y el handshake con GitHub se hacía sobre ese socket (error TLS 3).
+    this->m_ssl_client.stop();
+    this->m_client.stop();
+
     if(this->m_secure)
     {
         if(this->m_certificate != nullptr)
@@ -46,6 +52,23 @@ bool Global_Client::connect_to_server()
     else
     {
         logger.logln("No se pudo conectar al servidor");
+
+        // Con TLS, la librería guarda el motivo: 0 si falló antes (DNS o TCP), -1000 si no
+        // hubo memoria para el handshake, o el error de BearSSL (p. ej. certificado no confiable).
+        if(this->m_secure)
+        {
+            char reason[64] = "";
+            int code = this->m_ssl_client.getLastSSLError(reason, sizeof(reason));
+            logger.log("Error TLS: ");
+            logger.log(code);
+            logger.log(" ");
+            logger.logln(reason);
+            logger.log("Heap libre: ");
+            logger.log((unsigned long)ESP.getFreeHeap());
+            logger.log(", bloque maximo: ");
+            logger.logln((unsigned long)ESP.getMaxAllocHeap());
+        }
+
         this->m_global_client->stop();
         return false;
     }
