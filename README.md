@@ -109,8 +109,9 @@ Los tres firmwares **comparten un único directorio `src/`**. Cada objetivo de c
 ├── lib/                    # Librerías incluidas en el repositorio (ESP_SSLClient, jsmn)
 ├── test/                   # Pruebas
 ├── docs/                   # Documentación HTML generada por Doxygen (no versionada)
+├── bootloader/             # Bootloader I2C de los ATmega328PB (proyecto de PlatformIO aparte, se graba por ISP)
 ├── firmware_repository/    # Clone de aortiz-sudo/firmware_repository con los binarios OTA (ignorado por git)
-├── scripts/                # avr_bin.py (genera display.bin/printer.bin) y publish_firmware.py (publica la OTA)
+├── scripts/                # avr_bin.py (display.bin/printer.bin), esp32_otadata.py (boot_app0 en otadata) y publish_firmware.py (publica la OTA)
 ├── partitions.csv          # Esquema de particiones de la ESP32 (con OTA y coredump)
 ├── platformio.ini          # Configuración de entornos de compilación
 ├── Doxyfile                # Configuración de Doxygen
@@ -209,14 +210,44 @@ Ejemplos de comandos I2C: imprimir ticket, cambiar imagen de la pantalla, ajusta
 
 El sistema puede actualizar los tres firmwares de forma remota:
 
-1. El ESP32 lee `versions.txt` de la rama `main` del repo privado [`aortiz-sudo/firmware_repository`](https://github.com/aortiz-sudo/firmware_repository) (formato `esp32;display;impresora`, sin salto de línea final) y lo compara con las versiones instaladas, guardadas en `/github.txt`.
-2. Si una versión cambió, descarga ese binario desde el **tag del componente** y lo guarda en `/firmwares/` de la SD.
-3. **ESP32:** se actualiza a sí mismo usando el esquema de particiones OTA (`partitions.csv`, `app0`/`app1`).
-4. **ATmega (pantalla/impresora):** el ESP32 los reprograma por I2C a través de su bootloader, enviando el firmware página por página y verificando con CRC (comandos `I2C_START_FLASHING_CMD`, `I2C_FLASH_TO_ADDRESS_CMD`, `I2C_CRC_CMD`, `I2C_START_APPLICATION_CMD`).
+1. Todos los días, la primera vez que hay red durante la hora 04 del RTC, el ESP32 lee `versions.txt` de la rama `main` del repo privado [`aortiz-sudo/firmware_repository`](https://github.com/aortiz-sudo/firmware_repository). El formato es `esp32;display;impresora`, sin salto de línea final, y se compara con las versiones instaladas en `/github.txt`.
+2. Si una versión cambió, descarga ese binario desde el **tag del componente** a `/firmwares/download.tmp`. Solo si llegó completo lo mueve a su ruta final en `/firmwares/`.
+3. Con la pantalla en reposo, `check_firmware_triggers()` lo aplica: primero el display, luego la impresora y al final el ESP32, porque reinicia. La versión se guarda en `/github.txt` **después** de aplicarla; si falla, se reintenta en la siguiente revisión.
+4. **ESP32:** se actualiza a sí mismo con el esquema de particiones OTA (`partitions.csv`, `app0`/`app1`). Al arrancar escribe en el log la partición en uso.
+5. **ATmega (pantalla e impresora):** el ESP32 los reprograma por I2C a través de su bootloader (ver [Bootloader de los ATmega](#bootloader-de-los-atmega)). Envía el firmware página por página y lo verifica con CRC; se hacen hasta 3 intentos.
 
-La plataforma también puede pedir una versión del ESP32 con el evento WebSocket `actualizacionFirmware` y el payload `{"version":"1.1.0"}` (sin prefijo).
+La plataforma también puede pedir una versión del ESP32 con el evento WebSocket `actualizacionFirmware` y el payload `{"version":"1.1.0"}` (sin prefijo). Se aplica con la pantalla en reposo.
 
-> El flasheo (`check_firmware_triggers()`) y la revisión diaria de las 04:00 siguen desactivados mientras se terminan las pruebas. Hoy solo se descarga.
+### Bootloader de los ATmega
+
+El bootloader I2C de los dos ATmega328PB está en [bootloader/](bootloader/), un proyecto de PlatformIO aparte (4 KB en `0x7000`; display en `0x41`, impresora en `0x40`). Las apps entran a él con el comando `0x00` (reinicio por watchdog).
+
+| Comando | Trama | Respuesta (lectura de 1 byte) |
+|---|---|---|
+| Iniciar | `0x3E 0x02 TAM_MSB TAM_LSB` | Borra la página 0: desde aquí la app queda inválida |
+| Página | `0x3C 0x80 0x00` + 128 datos (131 bytes) | `0` = OK |
+| CRC | `0x3D CRC_MSB CRC_LSB` | `0` = OK; la página 0 se escribe solo si coincide |
+| Arrancar | `0x3F` | Arranca la app |
+
+Códigos de estado: `1` tamaño inválido, `2` dirección inválida, `3` fallo de escritura, `4` CRC distinto, `5` timeout, `6` desborde de buffer y `7` sin app (en reposo).
+
+- **Sin app** (flasheo cortado, o recién grabado por ISP), el bootloader no la arranca y espera al ESP32. Con la pantalla en reposo, el ESP32 revisa cada 60 s (hasta 3 veces por arranque) si algún ATmega responde `7`. Si es así, lo flashea con el binario de `/firmwares/`.
+- Si el ESP32 deja de mandar a mitad del flasheo, a los 10 s el bootloader se reinicia y espera sin app.
+
+**Grabarlo por ISP (USBasp), una sola vez por ATmega:**
+
+```bash
+pio run -d bootloader -e bootloader_display -t fuses     # o bootloader_printer
+pio run -d bootloader -e bootloader_display -t upload
+```
+
+> ⚠️ Grabar por ISP borra la flash completa, incluida la app; también cargar la app por USBasp borra el bootloader. Después de grabar el bootloader, la app se carga **desde el ESP32**: copia el binario a `/firmwares/display.bin` (o `printer.bin`) en la SD y el ESP32 lo recupera solo.
+
+Los equipos con el bootloader anterior, o sin bootloader, no se pueden flashear por I2C. El intento falla sin daño: la app se reinicia sola en ~1 s y se reintenta en la siguiente revisión.
+
+### Carga por USB después de una OTA
+
+`scripts/esp32_otadata.py` hace que `pio run -t upload` escriba `boot_app0.bin` en la dirección de `otadata` de `partitions.csv` (`0x9000`); el framework lo mandaba a `0xe000`. Así, un equipo que una OTA dejó arrancando en `app1` arranca el firmware recién cargado en `app0`.
 
 ### Tags y rutas en `firmware_repository`
 

@@ -99,8 +99,29 @@ class I2C_Master_Device : public Device
         bool device_ready();
 
         /**
+         * \brief               Espera a que la aplicación principal responda en su dirección I2C.
+         * \param p_timeout_ms  Tiempo máximo de espera.
+         * \return              true: La aplicación respondió. false: No respondió a tiempo.
+         */
+        bool app_ready(uint32_t p_timeout_ms);
+
+        /**
+         * \def     BOOTLOADER_NO_APP_STATUS
+         * \brief   Estado del bootloader en reposo sin app válida (ERROR_NO_APP en
+         *          bootloader/include/main_bootloader_unified.h): hay que flashearlo.
+         */
+        #define BOOTLOADER_NO_APP_STATUS 7
+
+        /**
+         * \brief   Lee el byte de estado del bootloader (dirección principal + 0x10).
+         * \return  El código de estado (0 = OK, 7 = sin app, ver bootloader/), o -1 si el
+         *          bootloader no responde (lo normal mientras corre la aplicación).
+         */
+        int bootloader_status();
+
+        /**
          * \brief   Indicarle al dispositivo I2C que inicialice la aplicación principal.
-         * 
+         *
          * \return  El estado de la operación.
          */
         status start_device();

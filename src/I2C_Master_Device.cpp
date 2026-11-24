@@ -55,6 +55,19 @@ size_t I2C_Master_Device::write_data(uint8_t *p_data, size_t p_data_legth)
 
     xSemaphoreGive(i2c_mutex);
 
+    // Wire solo acepta tantos bytes como su buffer (Wire.setBufferSize() en setup()): una
+    // trama más larga, como la página de 131 bytes del flasheo, se enviaba truncada sin aviso.
+    if(count != p_data_legth)
+    {
+        logger.log(this->m_address, HEX);
+        logger.log(" I2C: trama truncada, ");
+        logger.log(count);
+        logger.log(" de ");
+        logger.logln(p_data_legth);
+        set_status(DATA_OUT_OF_RANGE_ERROR);
+        return 0;
+    }
+
     if(transmission_status != 0)
     {
         logger.log(this->m_address, HEX);
@@ -254,8 +267,10 @@ status I2C_Master_Device::burn_firmware(File *p_file, size_t p_file_size)
         return get_status();
     }
     
-    vTaskDelay(100 / portTICK_PERIOD_MS);
-    
+    // El bootloader calcula el CRC de todo el firmware (~1 ms por cada 64 bytes a 8 MHz) y
+    // escribe la página 0 antes de responder; con 100 ms fijos no alcanzaba para apps grandes.
+    vTaskDelay((100 + p_file_size / 64) / portTICK_PERIOD_MS);
+
     uint8_t error_code = 0xFF;
     size_t bytes_read = read_data(&error_code, 1);
 
@@ -293,6 +308,21 @@ status I2C_Master_Device::burn_firmware(File *p_file, size_t p_file_size)
         set_address(main_app_address);
         return set_status(NACK_ERROR);
 
+    case 5:  // ERROR_TIMEOUT
+        logger.logln("ERROR: El bootloader agoto su tiempo de espera.");
+        set_address(main_app_address);
+        return set_status(TIMEOUT_ERROR);
+
+    case 6:  // ERROR_BUFFER_OVERFLOW
+        logger.logln("ERROR: La trama no cupo en el buffer del bootloader.");
+        set_address(main_app_address);
+        return set_status(DATA_OUT_OF_RANGE_ERROR);
+
+    case 7:  // ERROR_NO_APP
+        logger.logln("ERROR: El bootloader no recibio el firmware (sin app).");
+        set_address(main_app_address);
+        return set_status(NACK_ERROR);
+
     default:
         logger.log("ERROR DESCONOCIDO: ");
         logger.logln(error_code);
@@ -308,18 +338,59 @@ status I2C_Master_Device::burn_firmware(File *p_file, size_t p_file_size)
     command.length = 0;
     command.address = this->m_address;
     
+    // Si este comando no llega, el bootloader arranca la app solo a los 2 s.
     if(send_command(&command) != NO_DEVICE_ERROR)
-    {
-        logger.logln("Error al iniciar aplicación.");
-        set_address(main_app_address);
-        return get_status();
-    }
-    
-    // Esperar un poco antes de continuar
-    vTaskDelay(500 / portTICK_PERIOD_MS);
+        logger.logln("No se pudo enviar el inicio de la aplicacion; se espera a que arranque sola.");
 
     set_address(main_app_address);
-    return get_status();
+
+    // Antes se esperaban 500 ms fijos y se daba por bueno sin comprobar que la app arrancara.
+    if(!app_ready(5000))
+    {
+        logger.logln("La aplicacion no respondio despues del flasheo.");
+        return set_status(TIMEOUT_ERROR);
+    }
+
+    logger.logln("Aplicacion iniciada.");
+    return set_status(NO_DEVICE_ERROR);
+}
+
+bool I2C_Master_Device::app_ready(uint32_t p_timeout_ms)
+{
+    unsigned long start = millis();
+
+    // Se sondea con una lectura de 1 byte y no con una escritura vacía: las apps de los ATmega
+    // procesan una escritura de 0 bytes como un comando (con lo que haya en su buffer, y 0x00 es
+    // el reinicio por watchdog).
+    while(millis() - start < p_timeout_ms)
+    {
+        vTaskDelay(50 / portTICK_PERIOD_MS);
+
+        xSemaphoreTake(i2c_mutex, portMAX_DELAY);
+        TwoWire *port = static_cast<TwoWire *>(get_port());
+        size_t received = port->requestFrom(this->m_address, (uint8_t)1);
+        while(port->available())
+            port->read();
+        xSemaphoreGive(i2c_mutex);
+
+        if(received == 1)
+            return true;
+    }
+
+    return false;
+}
+
+int I2C_Master_Device::bootloader_status()
+{
+    xSemaphoreTake(i2c_mutex, portMAX_DELAY);
+    TwoWire *port = static_cast<TwoWire *>(get_port());
+    size_t received = port->requestFrom((uint8_t)(this->m_address + 0x10), (uint8_t)1);
+    int value = (received == 1 && port->available()) ? port->read() : -1;
+    while(port->available())
+        port->read();
+    xSemaphoreGive(i2c_mutex);
+
+    return value;
 }
 
 bool I2C_Master_Device::device_ready()

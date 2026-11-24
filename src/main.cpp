@@ -9,6 +9,7 @@
 #include "main.h"
 #include "github_ca.h"
 #include <time.h>
+#include <esp_ota_ops.h>
 
 //========================= Variables Globales =========================//
 
@@ -357,6 +358,18 @@ static const uint8_t github_param_sizes[] = { GITHUB_TOKEN_SIZE, sizeof(current_
 
 /// Ruta a los archivos de firmware.
 static const char *firmware_paths[3] = { ESP32_FW_PATH, DISPLAY_FW_PATH, PRINTER_FW_PATH };
+
+/// Archivo temporal de descarga: el binario pasa a su ruta final solo si llegó completo.
+static const char *fw_download_tmp_path = "/firmwares/download.tmp";
+
+/**
+ * @brief Versión descargada de cada componente que todavía no se aplica.
+ *
+ * Se guarda en /github.txt hasta que se flashea (commit_fw_version()). Antes se guardaba al
+ * descargar y un flasheo fallido ya no se reintentaba. Vacía cuando el binario de la SD no
+ * viene de una descarga (recuperación de un ATmega sin app).
+ */
+static char pending_fw_versions[3][10] = { "", "", "" };
 
 /// Host de la API de GitHub. Se resuelve por DNS y el nombre también se usa para SNI y para validar el certificado.
 static const char *github_api_host = "api.github.com";
@@ -744,8 +757,17 @@ void HTTP_Task(void *pvParameters)
       last_millis = current_millis;
     }
 
-    /*if(rtc_data[4] == 4 && rtc_data[5] == 0)
-      check_firmware_updates();*/
+    // Revisión diaria de firmware a las 04:00, una sola vez por día. La condición anterior
+    // (hora 4, minuto 0) seguía cierta todo el minuto y este ciclo es de 100 ms: habría
+    // consultado GitHub decenas de veces. Lo descargado se aplica con la pantalla en
+    // reposo (check_firmware_triggers()).
+    static uint8_t last_fw_check_day = 0xFF;
+
+    if(ethernet_begin && rtc_data[RTC_HOUR_INDEX] == 4 && rtc_data[RTC_DAY_INDEX] != last_fw_check_day)
+    {
+      last_fw_check_day = rtc_data[RTC_DAY_INDEX];
+      check_firmware_updates();
+    }
 
     vTaskDelay(100 / portTICK_PERIOD_MS);
   }
@@ -912,7 +934,9 @@ void setup()
   #endif
 
   config_io_pins();
-  //Wire.setBufferSize(256);
+  // La página del flasheo de los ATmega mide 131 bytes y el buffer de Wire es de 128 por
+  // defecto: sin esto se perdían los últimos 3 bytes de cada página.
+  Wire.setBufferSize(256);
   Wire.begin(SDA_PIN, SCL_PIN);
   SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
 
@@ -929,8 +953,17 @@ void setup()
   read_ca_cert();
   config_github();
 
+  const esp_partition_t *running = esp_ota_get_running_partition();
+  logger.log("Particion en uso: ");
+  logger.logln(running != nullptr ? running->label : "?");
+
   for(int i = 0; i < 128; i++)
   {
+    // Las apps del display y de la impresora procesan una escritura vacía como un comando
+    // (con lo que quede en su buffer; 0x00 es el reinicio por watchdog): no se sondean.
+    if(i == DISPLAY_ADDR || i == PRINTER_ADDR)
+      continue;
+
     Wire.beginTransmission(i);
 
     if(Wire.endTransmission() == 0)
@@ -4322,6 +4355,69 @@ static bool build_firmware_endpoint(char *p_endpoint, size_t p_size, uint8_t p_c
 }
 
 /**
+ * @brief Descarga un binario a un archivo temporal y, si llegó completo, lo deja en su ruta final.
+ *
+ * Así en /firmwares/ nunca queda un binario a medias: la recuperación de un ATmega sin app lo
+ * flashearía, porque el CRC coincide con lo que se envía.
+ * Requiere http_mutex tomado y la petición preparada con begin_github_request().
+ *
+ * @param p_final_path  Ruta final del binario (firmware_paths[]).
+ * @param p_endpoint    Endpoint de la API de GitHub.
+ * @return true si el binario quedó completo en p_final_path.
+ */
+static bool download_firmware_to(const char *p_final_path, const char *p_endpoint)
+{
+  SD.remove(fw_download_tmp_path);
+  File file = SD.open(fw_download_tmp_path, FILE_WRITE);
+
+  if(!file)
+  {
+    logger.logln("No se pudo abrir el archivo temporal de descarga.");
+    send_update_state(false);
+    return false;
+  }
+
+  bool downloaded = download_firmware(&file, p_endpoint);
+  file.close();
+
+  if(!downloaded)
+  {
+    SD.remove(fw_download_tmp_path);
+    return false;
+  }
+
+  SD.remove(p_final_path);
+
+  if(!SD.rename(fw_download_tmp_path, p_final_path))
+  {
+    logger.logln("No se pudo mover el firmware descargado a su ruta final.");
+    return false;
+  }
+
+  return true;
+}
+
+/**
+ * @brief Guarda en /github.txt la versión pendiente de un componente, una vez aplicada.
+ * @param p_component 0: ESP32, 1: display, 2: impresora.
+ */
+static void commit_fw_version(uint8_t p_component)
+{
+  // Binario de recuperación (sin descarga): la versión instalada no cambia.
+  if(pending_fw_versions[p_component][0] == '\0')
+    return;
+
+  uint8_t index = p_component + 1;
+  strncpy(github_parameters[index], pending_fw_versions[p_component], github_param_sizes[index] - 1);
+  github_parameters[index][github_param_sizes[index] - 1] = '\0';
+  pending_fw_versions[p_component][0] = '\0';
+
+  const char *param[1] = { github_parameters[index] };
+  uint8_t pos = github_param_pos[index];
+  save_parameter(GITHUB_PARAMETERS_PATH, param, &pos, 1);
+}
+
+/**
  * @brief Actualiza el firmware del dispositivo.
  *
  * Esta función es llamada cuando se recibe un mensaje por WebSocket con la versión
@@ -4364,36 +4460,24 @@ void update_firmware(const char *p_payload)
 
   logger.logln(endpoint);
 
-  File file = SD.open(ESP32_FW_PATH, FILE_WRITE);
-
-  if(!file)
-  {
-    logger.logln("No se pudo abrir el archivo.");
-    send_update_state(false);
-    return;
-  }
-
   char auth_value[sizeof("Bearer ") + GITHUB_TOKEN_SIZE] = "";
   bool ready = begin_github_request(auth_value, sizeof(auth_value));
 
   // Si la descarga falla, download_firmware() ya se lo reporta a la plataforma.
-  trigger_fw_update[0] = ready && download_firmware(&file, endpoint);
+  bool downloaded = ready && download_firmware_to(ESP32_FW_PATH, endpoint);
 
-  file.close();
   end_github_request();
 
   if(!ready)
     send_update_state(false);
 
-  if(!trigger_fw_update[0])
+  if(!downloaded)
     return;
 
-  // github_parameters[1] apunta a current_esp32_fw_v.
-  strncpy(current_esp32_fw_v, (const char *)version, sizeof(current_esp32_fw_v) - 1);
-  current_esp32_fw_v[sizeof(current_esp32_fw_v) - 1] = '\0';
-  const char *param[] = { github_parameters[1] };
-  uint8_t pos = github_param_pos[1];
-  save_parameter(GITHUB_PARAMETERS_PATH, param, &pos, 1);
+  // La versión se guarda en /github.txt cuando se aplica (update_esp32()).
+  strncpy(pending_fw_versions[0], (const char *)version, sizeof(pending_fw_versions[0]) - 1);
+  pending_fw_versions[0][sizeof(pending_fw_versions[0]) - 1] = '\0';
+  trigger_fw_update[0] = true;
 }
 
 void device_connected(const char *p_payload)
@@ -4523,6 +4607,7 @@ void check_firmware_updates()
   logger.logln((const char *)buffer);
 
   char versions[3][STRING_BUFFER] = { 0 };
+  bool downloaded[3] = { false, false, false };
 
   if(split_string((const char *)buffer, versions, 3, ';') < 3)
   {
@@ -4554,12 +4639,10 @@ void check_firmware_updates()
     if(!build_firmware_endpoint(endpoint, sizeof(endpoint), i, versions[i]))
       continue;
 
-    File file = SD.open(firmware_paths[i], FILE_WRITE);
-
-    if(!file)
+    // Ya descargada y esperando a que la pantalla esté en reposo para aplicarse.
+    if(trigger_fw_update[i] && strcmp(pending_fw_versions[i], versions[i]) == 0)
     {
-      send_update_state(false);
-      logger.logln("No se pudo abrir el archivo.");
+      logger.logln("La nueva version ya esta descargada, pendiente de aplicar.");
       continue;
     }
 
@@ -4567,18 +4650,21 @@ void check_firmware_updates()
     logger.logln("Descargando...");
     logger.logln(endpoint);
 
-    trigger_fw_update[i] = download_firmware(&file, endpoint);
-
-    file.close();
-
-    if(!trigger_fw_update[i])
+    if(!download_firmware_to(firmware_paths[i], endpoint))
       continue;
 
-    strncpy((char *)github_parameters[i + 1], (const char *)versions[i], github_param_sizes[i + 1] - 1);
-    github_parameters[i + 1][github_param_sizes[i + 1] - 1] = '\0';
-    const char *param[1] = { github_parameters[i + 1] };
-    uint8_t pos = github_param_pos[i + 1];
-    save_parameter(GITHUB_PARAMETERS_PATH, param, &pos, 1);
+    // La versión se guarda en /github.txt cuando se aplica (check_firmware_triggers()).
+    strncpy(pending_fw_versions[i], (const char *)versions[i], sizeof(pending_fw_versions[i]) - 1);
+    pending_fw_versions[i][sizeof(pending_fw_versions[i]) - 1] = '\0';
+    downloaded[i] = true;
+  }
+
+  // Se agenda hasta terminar todas las descargas: Screen_Task aplica en cuanto ve el disparador,
+  // y el ESP32 reinicia al actualizarse (cortaría la descarga de los demás).
+  for(int i = 0; i < 3; i++)
+  {
+    if(downloaded[i])
+      trigger_fw_update[i] = true;
   }
 
   end_github_request();
@@ -4587,61 +4673,135 @@ void check_firmware_updates()
 }
 
 /**
- * @brief Dispara el flasheo del firmware descargado (display, impresora y ESP32).
+ * @brief Suspende las tareas General, HTTP y WebSocket mientras Screen_Task flashea.
  *
- * @note PENDIENTE: las pruebas de actualización OTA del ESP32 y de carga de firmware
- *       a los ATmega a través de sus bootloaders están pospuestas. Por eso el cuerpo
- *       de esta función está comentado. Para realizar dichas pruebas hay que
- *       descomentar el bloque de abajo.
+ * Usan el I2C, la SD o el SPI. Cada tarea se suspende sola al ver TRIGGER_BIT; si alguna
+ * no llega en 5 s, se sigue de todos modos (el I2C está protegido por i2c_mutex).
+ */
+static void suspend_tasks_for_flashing()
+{
+  xEventGroupSetBits(suspend_task_group, TRIGGER_BIT);
+  xEventGroupWaitBits(suspend_task_group,
+      GENERAL_TASK_BIT | WS_TASK_BIT | HTTP_TASK_BIT,
+      pdFALSE, pdTRUE, pdMS_TO_TICKS(5000));
+}
+
+/** @brief Reanuda las tareas suspendidas por suspend_tasks_for_flashing(). */
+static void resume_tasks_after_flashing()
+{
+  xEventGroupClearBits(suspend_task_group,
+      TRIGGER_BIT | GENERAL_TASK_BIT | WS_TASK_BIT | HTTP_TASK_BIT);
+  vTaskResume(General_Task_Handle);
+  vTaskResume(HTTP_Task_Handle);
+  vTaskResume(Websocket_Task_Handle);
+}
+
+/// Intentos de flasheo de un ATmega antes de dejarlo para la siguiente revisión.
+static constexpr uint8_t ATMEGA_FLASH_ATTEMPTS = 3;
+
+/// Máximo de recuperaciones por arranque, para no suspender las tareas sin fin si fallan.
+static constexpr uint8_t ATMEGA_RECOVERY_LIMIT = 3;
+
+/**
+ * @brief Flashea un ATmega con el binario de la SD (con reintentos) y guarda su versión.
+ * @param p_component 1: display, 2: impresora.
+ */
+static void apply_atmega_firmware(uint8_t p_component)
+{
+  I2C_Master_Device *device = p_component == 1 ? (I2C_Master_Device *)screen : (I2C_Master_Device *)printer;
+  const char *name = p_component == 1 ? "display" : "impresora";
+
+  logger.log("Flasheando el controlador del ");
+  logger.logln(name);
+
+  suspend_tasks_for_flashing();
+
+  bool result = false;
+
+  for(uint8_t attempt = 1; attempt <= ATMEGA_FLASH_ATTEMPTS && !result; attempt++)
+  {
+    logger.log("Intento ");
+    logger.logln(attempt);
+    result = burn_firmware(device, firmware_paths[p_component]);
+  }
+
+  if(result)
+    commit_fw_version(p_component);
+
+  if(result && p_component == 1)
+  {
+    // La app del display reinició: reenviar brillo y página sin esperar al refresco periódico.
+    screen->set_brightness(screen->get_brightness());
+    screen->request_pic_update();
+  }
+
+  logger.log("Resultado del flasheo del ");
+  logger.log(name);
+  logger.logln(result ? ": OK" : ": FALLO (se reintenta en la siguiente revision)");
+
+  resume_tasks_after_flashing();
+
+  trigger_fw_update[p_component] = false;
+}
+
+/**
+ * @brief Detecta un ATmega sin app y agenda su recuperación con el binario de la SD.
+ *
+ * Sin app (flasheo interrumpido, o bootloader recién grabado por ISP) el bootloader de
+ * bootloader/ se queda esperando y responde BOOTLOADER_NO_APP_STATUS en dirección + 0x10.
+ * Se revisa cada 60 s con la pantalla en reposo, hasta ATMEGA_RECOVERY_LIMIT veces por arranque.
+ */
+static void check_atmega_recovery()
+{
+  static unsigned long last_check = 0;
+  static bool checked = false;
+  static uint8_t recoveries = 0;
+
+  if(recoveries >= ATMEGA_RECOVERY_LIMIT || (checked && millis() - last_check < 60000))
+    return;
+
+  checked = true;
+  last_check = millis();
+
+  for(uint8_t component = 1; component <= 2; component++)
+  {
+    I2C_Master_Device *device = component == 1 ? (I2C_Master_Device *)screen : (I2C_Master_Device *)printer;
+    const char *name = component == 1 ? "Display" : "Impresora";
+
+    if(trigger_fw_update[component] || device->bootloader_status() != BOOTLOADER_NO_APP_STATUS)
+      continue;
+
+    logger.log(name);
+
+    if(!SD.exists(firmware_paths[component]))
+    {
+      logger.logln(" sin app y sin binario en la SD.");
+      continue;
+    }
+
+    logger.logln(" sin app: se recupera con el binario de la SD.");
+    trigger_fw_update[component] = true;
+    recoveries++;
+  }
+}
+
+/**
+ * @brief Aplica el firmware descargado: display, impresora y, al final, el ESP32.
+ *
+ * Se llama desde Screen_Task solo con la pantalla en reposo (manage_screen()). La versión de
+ * cada componente se guarda en /github.txt después de aplicarse (commit_fw_version()).
  */
 void check_firmware_triggers()
 {
-  /*if(trigger_fw_update[1])
-  {
-    logger.logln("Nuevo firmware encontrado para el controlador del display!");
+  check_atmega_recovery();
 
-    // Suspender tareas que usan I2C durante el flasheo
-    xEventGroupSetBits(suspend_task_group, TRIGGER_BIT);
-    xEventGroupWaitBits(suspend_task_group,
-        GENERAL_TASK_BIT | WS_TASK_BIT | HTTP_TASK_BIT,
-        pdFALSE, pdTRUE, pdMS_TO_TICKS(5000));
-
-    bool result = burn_firmware(screen, DISPLAY_FW_PATH);
-    logger.log("Resultado display OTA: ");
-    logger.logln(result ? "OK" : "FALLO");
-
-    // Reanudar tareas
-    xEventGroupClearBits(suspend_task_group,
-        TRIGGER_BIT | GENERAL_TASK_BIT | WS_TASK_BIT | HTTP_TASK_BIT);
-    vTaskResume(General_Task_Handle);
-    vTaskResume(HTTP_Task_Handle);
-    vTaskResume(Websocket_Task_Handle);
-
-    trigger_fw_update[1] = false;
-  }
+  if(trigger_fw_update[1])
+    apply_atmega_firmware(1);
 
   if(trigger_fw_update[2])
-  {
-    logger.logln("Nuevo firmware encontrado para el controlador de la impresora!");
+    apply_atmega_firmware(2);
 
-    xEventGroupSetBits(suspend_task_group, TRIGGER_BIT);
-    xEventGroupWaitBits(suspend_task_group,
-        GENERAL_TASK_BIT | WS_TASK_BIT | HTTP_TASK_BIT,
-        pdFALSE, pdTRUE, pdMS_TO_TICKS(5000));
-
-    bool result = burn_firmware(printer, PRINTER_FW_PATH);
-    logger.log("Resultado printer OTA: ");
-    logger.logln(result ? "OK" : "FALLO");
-
-    xEventGroupClearBits(suspend_task_group,
-        TRIGGER_BIT | GENERAL_TASK_BIT | WS_TASK_BIT | HTTP_TASK_BIT);
-    vTaskResume(General_Task_Handle);
-    vTaskResume(HTTP_Task_Handle);
-    vTaskResume(Websocket_Task_Handle);
-
-    trigger_fw_update[2] = false;
-  }
-
+  // El ESP32 al final: si sale bien, reinicia.
   if(trigger_fw_update[0])
   {
     logger.logln("Nuevo firmware encontrado para la ESP32.");
@@ -4651,23 +4811,18 @@ void check_firmware_triggers()
     if(!new_fw_file)
     {
       logger.logln("No se encontró el archivo con el nuevo firmware.");
+      trigger_fw_update[0] = false;
       return;
     }
 
     size_t file_size = new_fw_file.size();
 
     if(!update_esp32(&new_fw_file, file_size))
-    {
-      xEventGroupClearBits(suspend_task_group, TRIGGER_BIT | GENERAL_TASK_BIT | WS_TASK_BIT | HTTP_TASK_BIT);
-      vTaskResume(HTTP_Task_Handle);
-      vTaskResume(Websocket_Task_Handle);
-      vTaskResume(General_Task_Handle);
+      resume_tasks_after_flashing();
 
-      new_fw_file.close();
-    }
-
+    new_fw_file.close();
     trigger_fw_update[0] = false;
-  }*/
+  }
 }
 
 bool download_firmware(File *p_file, const char *p_endpoint)
@@ -4690,14 +4845,9 @@ bool download_firmware(File *p_file, const char *p_endpoint)
 
 bool update_esp32(File *p_file, size_t p_file_size)
 {
-  xEventGroupSetBits(suspend_task_group, TRIGGER_BIT);
-
-  EventBits_t bits = xEventGroupWaitBits(
-                        suspend_task_group, 
-                        GENERAL_TASK_BIT | WS_TASK_BIT | HTTP_TASK_BIT, 
-                        pdTRUE, 
-                        pdTRUE, 
-                        portMAX_DELAY);
+  // Antes se esperaba sin límite (portMAX_DELAY): si una tarea no llegaba a suspenderse,
+  // Screen_Task se quedaba bloqueada.
+  suspend_tasks_for_flashing();
 
   logger.logln("Inicializando la actualización...");
 
@@ -4717,6 +4867,8 @@ bool update_esp32(File *p_file, size_t p_file_size)
     if(Update.write(buffer, len) != len)
     {
       logger.logln("Error al escribir el firmware.");
+      Update.abort();
+      send_update_state(false);
       return false;
     }
 
@@ -4727,6 +4879,8 @@ bool update_esp32(File *p_file, size_t p_file_size)
 
   if(Update.end(true))
   {
+    // Antes de reportar: send_update_state() manda current_esp32_fw_v, que ya es la nueva.
+    commit_fw_version(0);
     send_update_state(true);
     websocket_client->set_status_code(NORMAL_CLOSURE);
     websocket_client->send_close_message("reinicio");
