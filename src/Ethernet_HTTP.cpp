@@ -1,5 +1,8 @@
 #include "Ethernet_HTTP.h"
 
+/// Tiempo máximo sin recibir datos mientras se lee el cuerpo de una respuesta.
+static constexpr unsigned long HTTP_BODY_TIMEOUT_MS = 5000;
+
 int Ethernet_HTTP::send_data_to_server(const uint8_t *p_data, size_t p_data_length)
 {
     if(!this->m_server || !this->m_endpoint)
@@ -21,28 +24,57 @@ int Ethernet_HTTP::get_data_from_server(uint8_t *p_data, size_t p_data_length)
     logger.log("Codigo HTTP: ");
     logger.logln(http_code);
 
-    if(content_length < 1)
-        return HTTP_ERROR_NO_STREAM;
+    // En todas las salidas se cierra la conexión: antes los errores la dejaban
+    // abierta y el W5500 solo tiene 8 sockets.
+    if(http_code < 0)
+    {
+        if(this->m_global_client)
+            this->m_global_client->stop();
 
-    if(content_length >= p_data_length)
+        return http_code;
+    }
+
+    if(content_length < 1)
+    {
+        this->m_global_client->stop();
+        return HTTP_ERROR_NO_STREAM;
+    }
+
+    if(content_length >= (int)p_data_length)
+    {
+        logger.logln("La respuesta no cabe en el buffer.");
+        this->m_global_client->stop();
         return HTTP_ERROR_BUFFER_OVERFLOW;
+    }
 
     if(http_code / 200 != 1)
-        return -1;
-
-    int byte_counter = 0;
-
-    while(this->m_global_client->connected() && byte_counter < content_length)
     {
-        while(this->m_global_client->available())
+        this->m_global_client->stop();
+        return -1;
+    }
+
+    // Cada bloque se agrega después de lo ya recibido. Antes se escribía siempre
+    // al inicio del buffer y una respuesta que llegaba en varios segmentos TCP
+    // (más de ~1460 bytes) quedaba corrupta.
+    int byte_counter = 0;
+    unsigned long last_data_millis = millis();
+
+    while(byte_counter < content_length && (this->m_global_client->connected() || this->m_global_client->available()))
+    {
+        if(this->m_global_client->available())
         {
-            int length = this->m_global_client->read(p_data, p_data_length);
+            int length = this->m_global_client->read(p_data + byte_counter, content_length - byte_counter);
 
             if(length > 0)
+            {
                 byte_counter += length;
-            else
-                vTaskDelay(1 / portTICK_PERIOD_MS);
+                last_data_millis = millis();
+                continue;
+            }
         }
+
+        if(millis() - last_data_millis > HTTP_BODY_TIMEOUT_MS)
+            break;
 
         vTaskDelay(1 / portTICK_PERIOD_MS);
     }
@@ -50,6 +82,15 @@ int Ethernet_HTTP::get_data_from_server(uint8_t *p_data, size_t p_data_length)
     this->m_global_client->stop();
 
     p_data[byte_counter] = '\0';
+
+    if(byte_counter < content_length)
+    {
+        logger.log("Respuesta incompleta: ");
+        logger.log(byte_counter);
+        logger.log(" de ");
+        logger.logln(content_length);
+        return HTTP_ERROR_READ_TIMEOUT;
+    }
 
     return byte_counter;
 }

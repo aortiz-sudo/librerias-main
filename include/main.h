@@ -31,6 +31,26 @@ extern "C"
   #include <esp_core_dump.h>
 }
 
+/*--------------- VARIANTE DE PANTALLA (RTC) ---------------*/
+/**
+ * \def   DISPLAY_HAS_INTERNAL_RTC
+ * \brief Selecciona como se mantiene la fecha y hora de la pantalla DWIN.
+ *
+ * - 1: la pantalla trae RTC de hardware con supercapacitor. Se ajusta una sola
+ *      vez por el registro RTC_Set (0x009C) y despues mantiene la hora por si
+ *      misma; el control "Text RTC" de DGUS la pinta sin intervencion del MCU.
+ * - 0: la pantalla NO trae RTC. El MCU debe repintar la hora periodicamente en
+ *      el registro 0x0010, que solo acepta escritura en ese hardware.
+ *
+ * Se define por entorno en platformio.ini: los envs esp32* son para la pantalla
+ * nueva y los esp32*_legacy para la anterior. A proposito no tiene valor por
+ * defecto: elegir mal solo se nota en campo (reloj parpadeando u hora congelada),
+ * asi que es preferible que falle la compilacion.
+ */
+#if !defined(DISPLAY_HAS_INTERNAL_RTC)
+  #error "Define DISPLAY_HAS_INTERNAL_RTC=1 (pantalla con RTC propio) o =0 (pantalla sin RTC). Compila con un entorno esp32* o esp32*_legacy de platformio.ini."
+#endif
+
 /*---------------- DEFINE UART PORTS ----------------*/
 /**
  * \def   PORT_LLS
@@ -132,6 +152,27 @@ extern "C"
  */
 #define RELAY_PIN_3      (int8_t)05
 
+/*------------- ESCURRIMIENTO -------------*/
+/**
+ * \def   AFTERFLOW_MIN_MS
+ * \brief Valor por defecto del tiempo mínimo (ms) que se siguen contando pulsos después de
+ *        cerrar las válvulas. Mientras las válvulas cierran y la bomba se detiene, el
+ *        combustible sigue pasando por el medidor (escurrimiento). Se cambia con el
+ *        comando "escurrimiento" de la consola y se guarda en /escurrimiento.txt.
+ */
+#define AFTERFLOW_MIN_MS    (unsigned long)2000
+/**
+ * \def   AFTERFLOW_QUIET_MS
+ * \brief Valor por defecto: pasado el mínimo, el conteo del escurrimiento termina tras este
+ *        tiempo (ms) sin pulsos. Con los dos tiempos en 0 el escurrimiento no se cuenta.
+ */
+#define AFTERFLOW_QUIET_MS  (unsigned long)1000
+/**
+ * \def   AFTERFLOW_SETTING_MAX_MS
+ * \brief Valor máximo (ms) que acepta la consola para cada tiempo del escurrimiento.
+ */
+#define AFTERFLOW_SETTING_MAX_MS  (unsigned long)30000
+
 /*-------------- UART PINS -------------*/
 /**
  * \def   RFID_RX_PIN
@@ -153,6 +194,16 @@ extern "C"
  * \brief Pin TX para el sensor LLS.
  */
 #define LLS_TX_PIN  (int8_t)27
+/**
+ * \def   LLS_READ_INTERVAL_MS
+ * \brief Intervalo entre lecturas del sensor LLS cuando la última lectura fue válida (10 minutos).
+ */
+#define LLS_READ_INTERVAL_MS  600000UL
+/**
+ * \def   LLS_RETRY_INTERVAL_MS
+ * \brief Intervalo de reintento de lectura del sensor LLS cuando la última lectura falló (30 segundos).
+ */
+#define LLS_RETRY_INTERVAL_MS 30000UL
 
 /*-------------- SPI PINS --------------*/
 /**
@@ -303,6 +354,12 @@ extern "C"
  */
 #define USER_NAME_SIZE      (uint8_t)0x20
 
+
+/**
+ * \def   PARAMETERS_LINES
+ * \brief Número de renglones de /Parametros.txt (posiciones 0x00 a PRODUCT_ID_POS).
+ */
+#define PARAMETERS_LINES    21
 
 /*---------------- POSICIÓN DE LOS PARÁMETROS EN EL ARCHIVO ----------------*/
 /**
@@ -461,7 +518,49 @@ extern "C"
 #define RTC_SECOND_INDEX  6     ///< Índice del segundo en el arreglo RTC.
 
 #define MAX_NUMBER_OF_USERS 32          ///< Número máximo de usuarios registrados.
+#define MAX_NUMBER_OF_TAGS 64           ///< Número máximo de tags registrados.
+#define TAG_ID_SIZE 24                  ///< Tamaño máximo del identificador de un tag (incluye el nulo).
 #define MAX_NUMBER_OF_DISPATCHES 48     ///< Número máximo de despachos almacenados.
+
+/*--------------- SINCRONIZACIÓN CON LA PLATAFORMA ---------------*/
+/**
+ * \def   PLATFORM_SYNC_INTERVAL_MS
+ * \brief Intervalo entre descargas del cliente, usuarios, tags y precio (24 horas).
+ *        La primera descarga se hace en cuanto hay red después de encender.
+ */
+#define PLATFORM_SYNC_INTERVAL_MS 86400000UL
+/**
+ * \def   PLATFORM_SYNC_RETRY_MS
+ * \brief Reintento de la descarga cuando la anterior falló (5 minutos).
+ */
+#define PLATFORM_SYNC_RETRY_MS    300000UL
+/**
+ * \def   PLATFORM_BUFFER_SIZE
+ * \brief Tamaño del buffer para las respuestas de la plataforma. Cada usuario
+ *        ocupa unos 230 bytes y cada tag unos 190, así que caben los
+ *        MAX_NUMBER_OF_USERS usuarios o los MAX_NUMBER_OF_TAGS tags con margen.
+ */
+#define PLATFORM_BUFFER_SIZE      16384
+
+/*--------------- LECTURA DEL TAG EN EL DESPACHO ---------------*/
+/**
+ * \def   RFID_DISPATCH_READ_INTERVAL_MS
+ * \brief Intervalo entre lecturas del tag desde que se presiona "iniciar" hasta que
+ *        termina el despacho. Cada lectura bloquea General_Task de 100 a 200 ms.
+ */
+#define RFID_DISPATCH_READ_INTERVAL_MS 1000UL
+/**
+ * \def   RFID_MAX_MISSED_READS
+ * \brief Lecturas seguidas sin el tag que inició el despacho para pausarlo.
+ */
+#define RFID_MAX_MISSED_READS          3
+/**
+ * \def   RFID_CHECK_INTERVAL_MS
+ * \brief Fuera del despacho solo se consulta el lector, cada 10 minutos, para
+ *        avisar si se desconectó.
+ */
+#define RFID_CHECK_INTERVAL_MS         600000UL
+
 #define MAX_EVENT_JSON_LENGTH 256       ///< Longitud máxima del JSON de un evento.
 #define MAX_UPDATE_JSON_LENGTH 64       ///< Longitud máxima del JSON de una actualización.
 

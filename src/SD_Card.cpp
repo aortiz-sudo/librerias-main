@@ -66,9 +66,66 @@ int read_file(const char *p_path, char p_lines[][128], size_t p_buffer_size, cha
       break;
   }
 
+  // Último renglón sin salto de línea al final del archivo: antes se perdía.
+  if(index > 0 && count < p_buffer_size)
+  {
+    p_lines[count][index] = '\0';
+    count++;
+  }
+
   file.close();
 
   return count;
+}
+
+int count_lines(const char *p_path)
+{
+  File file = SD.open(p_path, FILE_READ);
+
+  if(!file)
+    return -1;
+
+  int count = 0;
+  bool pending = false;
+
+  while(file.available())
+  {
+    char c = file.read();
+
+    if(c == '\n')
+    {
+      count++;
+      pending = false;
+      vTaskDelay(1 / portTICK_PERIOD_MS);
+    }
+    else if(c != '\r')
+      pending = true;
+  }
+
+  file.close();
+
+  return pending ? count + 1 : count;
+}
+
+bool write_lines(const char *p_path, char p_lines[][128], size_t p_count)
+{
+  File file = SD.open(p_path, FILE_WRITE);
+
+  if(!file)
+  {
+    logger.logln("No se pudo abrir el archivo");
+    return false;
+  }
+
+  for(size_t i = 0; i < p_count; i++)
+  {
+    file.print(p_lines[i]);
+    file.print("\r\n");
+  }
+
+  file.close();
+
+  return true;
 }
 
 int get_number_of_lines(const char *p_path)
@@ -252,14 +309,19 @@ bool erase_events(size_t n)
 
 bool save_parameter(const char *p_path, const char **p_params, uint8_t *p_param_pos, size_t p_param_num)
 { 
-  int lines =  get_number_of_lines(p_path);
+  // count_lines() cuenta también un último renglón sin salto de línea. Con
+  // get_number_of_lines() ese renglón no se contaba y se borraba al reescribir.
+  int lines = count_lines(p_path);
 
   if(lines < 1)
     return false;
 
   char sd_parameters[lines][128];
+  int read = read_file(p_path, sd_parameters, lines, '\n');
 
-  if(!read_file(p_path, sd_parameters, lines, '\n'))
+  // read_file() regresa -1 si no abre el archivo; antes eso pasaba como éxito y se
+  // escribía el buffer sin inicializar.
+  if(read <= 0)
   {
     logger.logln("Error al guardar los parametros.");
     return false;
@@ -269,9 +331,9 @@ bool save_parameter(const char *p_path, const char **p_params, uint8_t *p_param_
 
   logger.logln("Guardando parametros...");
 
-  for(int i = 0; i < lines; i++)
+  for(int i = 0; i < read; i++)
   {
-    if(i == p_param_pos[counter])
+    if(counter < p_param_num && i == p_param_pos[counter])
     {
       strncpy(sd_parameters[i], p_params[counter], 127);
       sd_parameters[i][127] = '\0';
@@ -279,19 +341,10 @@ bool save_parameter(const char *p_path, const char **p_params, uint8_t *p_param_
     }
   }
 
-  bool save = true;
-  int line_counter = lines;
-  counter = 0;
+  // Se reescribe de una sola vez (antes eran un vaciado y dos escrituras por renglón):
+  // el archivo queda a medias durante mucho menos tiempo si se va la luz.
+  bool save = write_lines(p_path, sd_parameters, read);
 
-  if(!write_to_file(p_path, ""))
-    save = false;
-
-  while(save && line_counter--)
-  {
-    save = append_to_file(p_path, sd_parameters[counter++]);
-    append_to_file(p_path, "\r\n");
-  }
-  
   logger.logln(save ? "Parametros guardados exitosamente." : "Error al guardar los parametros.");
 
   return save;

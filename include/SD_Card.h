@@ -19,6 +19,8 @@
 #define API_KEY_PATH                    "/api-key.txt"             ///< Ruta para obtener la api key.
 #define CA_CERT_PATH                    "/ca-cert.pem"             ///< Ruta para el certificado SSL raíz.
 #define USERS_PATH                      "/usuarios.txt"            ///< Ruta para los usuarios.
+#define TAGS_PATH                       "/tags.txt"                ///< Ruta para los tags registrados en la plataforma.
+#define AFTERFLOW_PATH                  "/escurrimiento.txt"       ///< Ruta de los tiempos del escurrimiento (mínimo y sin pulsos, en ms).
 #define EVENTS_TMP_PATH                 "/Eventos_tmp.txt"         ///< Ruta temporal de los eventos.
 #define PARAMETERS_BACKUP_PATH          "/backups/Parametros.txt"  ///< Ruta para respaldo de los parametros.
 #define DISPATCHES_BACKUP_PATH          "/backups/Despachos.txt"   ///< Ruta para respaldo de los despachos.
@@ -43,6 +45,9 @@ typedef enum : uint8_t
     SAVE_GITHUB_PARAMETER,  ///< Guardar un parámetro de GitHub.
     SAVE_API_KEY,           ///< Guardar la API key.
     SAVE_USER,              ///< Guardar un usuario.
+    SAVE_USERS_LIST,        ///< Reescribir /usuarios.txt con la última lista de usuarios.
+    SAVE_TAGS_LIST,         ///< Reescribir /tags.txt con la lista de tags.
+    SAVE_FILE,              ///< Reescribir un archivo completo con el texto recibido.
 } save_type_t;
 
 /**
@@ -94,6 +99,25 @@ int read_file(const char *p_path, char p_lines[][128], size_t p_buffer_size, cha
  *                 >-1: Número de líneas.
  */
 int get_number_of_lines(const char *p_path);
+
+/**
+ * \brief           Cuenta los renglones de un archivo de texto, incluido un último renglón
+ *                  sin salto de línea (get_number_of_lines() solo cuenta los saltos).
+ * \param p_path    Ruta del archivo.
+ * \returns         -1: No se pudo leer el archivo.
+ *                 >-1: Número de renglones.
+ */
+int count_lines(const char *p_path);
+
+/**
+ * \brief           Reescribe un archivo con los renglones dados, cada uno con su salto de línea.
+ * \param p_path    Ruta del archivo.
+ * \param p_lines   Renglones a escribir.
+ * \param p_count   Número de renglones.
+ * \returns         true: Se escribió el archivo.
+ *                  false: No se pudo abrir el archivo.
+ */
+bool write_lines(const char *p_path, char p_lines[][128], size_t p_count);
 
 /**
  * \brief           Función para guardar un evento que no se pudo enviar al servidor.

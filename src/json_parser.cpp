@@ -10,6 +10,166 @@ int JSON_Parser::parse_json(const char *p_json)
     return tokens;
 }
 
+int JSON_Parser::parse_json(const char *p_json, size_t p_length)
+{
+    jsmn_init(&this->m_json_parser);
+    int tokens = jsmn_parse(&this->m_json_parser, p_json, p_length, this->m_json_tokens, JSON_MAX_TOKENS);
+
+    this->m_json_token_count = tokens > 0 ? tokens : 0;
+
+    return tokens;
+}
+
+bool JSON_Parser::get_value_text(const char *p_json, int p_obj_index, const char *p_key, char *p_out, size_t p_out_size, bool *p_is_null)
+{
+    if(p_is_null)
+        *p_is_null = false;
+
+    if(!p_out || p_out_size == 0)
+        return false;
+
+    p_out[0] = '\0';
+
+    int index = json_find_key_in_object(p_json, p_obj_index, p_key);
+
+    if(index < 0)
+        return false;
+
+    const jsmntok_t *token = &this->m_json_tokens[index];
+
+    if(token->type != JSMN_STRING && token->type != JSMN_PRIMITIVE)
+        return false;
+
+    copy_token_value(p_json, token, p_out, p_out_size);
+
+    if(token->type == JSMN_PRIMITIVE && strcmp(p_out, "null") == 0)
+    {
+        if(p_is_null)
+            *p_is_null = true;
+
+        p_out[0] = '\0';
+    }
+
+    return true;
+}
+
+const char *JSON_Parser::skip_string(const char *p_quote)
+{
+    for(const char *p = p_quote + 1; *p; p++)
+    {
+        if(*p == '\\')
+        {
+            if(*(p + 1) == '\0')
+                return nullptr;
+
+            p++;
+        }
+        else if(*p == '"')
+            return p;
+    }
+
+    return nullptr;
+}
+
+const char *JSON_Parser::find_root_array(const char *p_json, const char *p_key)
+{
+    if(!p_json || !p_key)
+        return nullptr;
+
+    size_t key_length = strlen(p_key);
+    int depth = 0;
+
+    for(const char *p = p_json; *p; p++)
+    {
+        if(*p == '"')
+        {
+            const char *end = skip_string(p);
+
+            if(!end)
+                return nullptr;
+
+            // Solo cuentan las claves del objeto raíz (profundidad 1), no textos dentro de valores.
+            bool is_key = depth == 1 && (size_t)(end - p - 1) == key_length && strncmp(p + 1, p_key, key_length) == 0;
+            p = end;
+
+            if(!is_key)
+                continue;
+
+            const char *value = end + 1;
+
+            while(isspace((unsigned char)*value))
+                value++;
+
+            if(*value != ':')
+                continue;
+
+            value++;
+
+            while(isspace((unsigned char)*value))
+                value++;
+
+            return *value == '[' ? value : nullptr;
+        }
+
+        if(*p == '{' || *p == '[')
+            depth++;
+        else if(*p == '}' || *p == ']')
+            depth--;
+    }
+
+    return nullptr;
+}
+
+bool JSON_Parser::next_array_object(const char **p_cursor, const char **p_object, size_t *p_length)
+{
+    if(!p_cursor || !*p_cursor)
+        return false;
+
+    const char *p = *p_cursor;
+
+    if(*p == '[')
+        p++;
+
+    while(*p && (isspace((unsigned char)*p) || *p == ','))
+        p++;
+
+    if(*p != '{')
+        return false;
+
+    const char *start = p;
+    int depth = 0;
+
+    for(; *p; p++)
+    {
+        if(*p == '"')
+        {
+            p = skip_string(p);
+
+            if(!p)
+                return false;
+
+            continue;
+        }
+
+        if(*p == '{' || *p == '[')
+            depth++;
+        else if(*p == '}' || *p == ']')
+        {
+            depth--;
+
+            if(depth == 0)
+            {
+                *p_object = start;
+                *p_length = (size_t)(p - start + 1);
+                *p_cursor = p + 1;
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
 bool JSON_Parser::jsoneq(const char *p_json, const jsmntok_t *p_token, const char *p_key)
 {
     int len = p_token->end - p_token->start;
@@ -168,7 +328,10 @@ void JSON_Parser::parse_user(const char *p_json, int p_obj_index, user_json_stru
         json_parse_value_result<const char *> result  = token_to_string<const char *>(p_json, &this->m_json_tokens[password_index], password, sizeof(password));
 
         if(result.success && !result.is_null)
+        {
             strncpy(p_user->password, password, sizeof(p_user->password));
+            p_user->password[sizeof(p_user->password) - 1] = '\0';
+        }
         else
             p_user->password[0] = '\0';
     }
@@ -252,7 +415,9 @@ int JSON_Parser::json_skip(const jsmntok_t *tokens, int index)
     int count = 1;
     int end = tokens[index].end;
 
-    for(int i = index + 1; tokens[i].start < end; i++)
+    // Se limita a los tokens del último parseo: los que siguen son de parseos
+    // anteriores y, al saltar el último valor de un objeto, se contaban como hijos.
+    for(int i = index + 1; i < this->m_json_token_count && tokens[i].start < end; i++)
         count++;
     
     return count;

@@ -11,6 +11,17 @@
 #include "Definitions.h"
 
 /**
+ * \def     PRINTER_I2C_CHUNK_LEN
+ * \brief   Bytes de texto que viajan en cada trama I2C hacia el controlador de la impresora.
+ *
+ * El ATmega de la impresora recibe en el buffer TWI de Wire, de 32 bytes
+ * (TWI_BUFFER_SIZE por defecto en MiniCore; el env printer no lo amplía). Cada
+ * trama lleva además el byte de comando y el de longitud, así que caben 30.
+ * Una trama más larga la rechaza el AVR con NACK y la línea se pierde.
+ */
+#define PRINTER_I2C_CHUNK_LEN 30
+
+/**
  * \struct  peripehals_param_struct
  * \brief   Estructura de parámetros para inicializar el dispositivo Peripehals.
  * 
@@ -115,6 +126,14 @@ class Peripehals : public I2C_Master_Device
         status reset_printer();
 
     private:
+        /**
+         * \brief           Envía a la impresora un bloque que cabe en una sola trama I2C.
+         * \param p_data    Datos a imprimir.
+         * \param p_length  Longitud del bloque (máximo \ref PRINTER_I2C_CHUNK_LEN).
+         * \returns         Estado de la operación.
+         */
+        status printer_write_chunk(const uint8_t *p_data, size_t p_length);
+
         char m_mac_address[18] = "";        ///< Dirección MAC del periférico.
         bool m_data_received = false;       ///< Indica si se recibieron datos del periférico.
         float m_voltage = 0.0;              ///< Voltaje leído del periférico.

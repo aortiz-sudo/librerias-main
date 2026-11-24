@@ -88,6 +88,9 @@ status Screen::system_reset()
     return send_command(&command);
 }
 
+/// Cada cuánto se reenvía la página actual aunque no haya cambiado.
+static constexpr unsigned long PIC_REFRESH_MS = 1000;
+
 status Screen::update(char p_key)
 {
     if(p_key)
@@ -96,10 +99,19 @@ status Screen::update(char p_key)
     this->m_current_state->screen(p_key);
     transition();
 
-    // Solo enviar change_pic si hubo una transición real
-    if(this->m_pic_changed)
+    // El ATmega muestra la página base del estado más su contador. El despacho
+    // (18 a 21) y la calibración cambian de subpantalla solo con el contador, así
+    // que la página se manda al cambiar de estado, cuando un estado la pide o
+    // cuando cambia el contador. También se reenvía cada PIC_REFRESH_MS: el ATmega
+    // ignora la página repetida y, si un cambio se perdió en su cola, se recupera.
+    uint8_t counter = (uint8_t)this->m_current_state->get_counter();
+    unsigned long now = millis();
+
+    if(this->m_pic_changed || counter != this->m_last_pic_counter || now - this->m_last_pic_millis >= PIC_REFRESH_MS)
     {
         this->m_pic_changed = false;
+        this->m_last_pic_counter = counter;
+        this->m_last_pic_millis = now;
         return change_pic();
     }
 

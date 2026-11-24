@@ -93,6 +93,16 @@ class UART_Device : public Device
         void reset_serial_port(unsigned long p_BAUD_RATE, int p_config = SERIAL_8N1);
 
         /**
+         * \brief Descarta los bytes pendientes en el buffer de recepcion.
+         *
+         *        Necesario antes de enviar un comando que espera respuesta: una trama
+         *        no solicitada del dispositivo (o el ACK tardio de un comando previo)
+         *        se leeria como si fuera la respuesta de este, y a partir de ahi el
+         *        puerto queda desincronizado y cada lectura agota el timeout.
+         */
+        void flush_input();
+
+        /**
          * \brief           Establece el tiempo de espera para operaciones UART.
          * \param p_timeout Tiempo de espera en milisegundos.
          */

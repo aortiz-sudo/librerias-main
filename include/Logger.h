@@ -95,6 +95,13 @@ class Logger : public Print
         }
 
         /**
+         * \brief           Silencia o restaura la salida del log al puerto serie (depuración).
+         *                  El log en la SD no se silencia: es el historial del equipo.
+         * \param p_muted   true: silenciar, false: restaurar.
+         */
+        void set_serial_muted(bool p_muted);
+
+        /**
          * \brief       Función para establecer los punteros en donde se guardan los datos de la fecha y hora.
          * \param p_rtc Array de punteros en donde se guardan la fecha y hora.
          */
@@ -106,6 +113,7 @@ class Logger : public Print
 
     private:
         Print *m_logger = nullptr; ///< Puntero al objeto Print utilizado para mostrar los datos.
+        Print *m_unmuted_logger = nullptr; ///< Salida que se restaura al quitar el silencio.
         uint8_t *m_rtc[6] = { nullptr, nullptr, nullptr, nullptr, nullptr, nullptr }; ///< Array de punteros para fecha y hora (año, mes, día, hora, minuto, segundo).
         File m_file_logger; ///< Archivo para guardar los logs en la SD.
         bool m_use_file = false; ///< Indica si se utiliza el archivo para guardar logs.

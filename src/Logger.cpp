@@ -2,6 +2,33 @@
 
 Logger logger;
 
+/**
+ * \brief Salida que descarta todo. Sustituye al puerto serie mientras el log está
+ *        silenciado, así ninguna de las funciones log/logln necesita revisarlo.
+ */
+class Null_Print : public Print
+{
+    public:
+        size_t write(uint8_t) override { return 1; }
+        size_t write(const uint8_t *, size_t p_length) override { return p_length; }
+};
+
+static Null_Print null_print;
+
+void Logger::set_serial_muted(bool p_muted)
+{
+    if(this->m_use_file)
+        return;
+
+    if(p_muted && this->m_logger != &null_print)
+    {
+        this->m_unmuted_logger = this->m_logger;
+        this->m_logger = &null_print;
+    }
+    else if(!p_muted && this->m_logger == &null_print)
+        this->m_logger = this->m_unmuted_logger;
+}
+
 void Logger::begin(bool p_debug)
 {
     if(!p_debug)

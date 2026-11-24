@@ -151,13 +151,100 @@ class Screen : public I2C_Master_Device
         }
 
         /**
-         * \brief   Indica si se ha detectado un tag RFID.
-         * \returns true: Si se detectó.
+         * \brief   Indica si se está leyendo el tag del despacho.
+         * \returns true: Antes de arrancar, se leyó un tag registrado. Ya arrancado,
+         *          se sigue leyendo el tag que inició el despacho.
          *          false: En caso contrario.
          */
         inline bool get_tag_detected() const
         {
             return this->m_tag_detected;
+        }
+
+        /**
+         * \brief   Empieza a leer el tag del despacho (al presionar "iniciar").
+         * \details Abre una sesión de lectura nueva: lo leído antes se descarta y
+         *          get_tag_detected() es false hasta que se lea un tag registrado.
+         */
+        inline void start_tag_reading()
+        {
+            this->m_tag_detected = false;
+            this->m_tag_message = nullptr;
+            this->m_tag_session++;
+            this->m_tag_reading = true;
+        }
+
+        /**
+         * \brief Deja de leer el tag: el despacho terminó o se salió de la pantalla.
+         */
+        inline void stop_tag_reading()
+        {
+            this->m_tag_reading = false;
+            this->m_tag_session++;
+            this->m_tag_detected = false;
+            this->m_tag_message = nullptr;
+        }
+
+        /**
+         * \brief   Indica si la pantalla de despacho pidió leer el tag.
+         * \returns true: Hay que leer el tag. false: En caso contrario.
+         */
+        inline bool get_tag_reading() const
+        {
+            return this->m_tag_reading;
+        }
+
+        /**
+         * \brief   Obtiene la sesión de lectura actual.
+         * \details Cambia cada vez que se empieza o se deja de leer, para descartar el
+         *          resultado de una lectura que empezó en una sesión anterior.
+         * \returns Número de sesión.
+         */
+        inline uint8_t get_tag_session() const
+        {
+            return this->m_tag_session;
+        }
+
+        /**
+         * \brief               Reporta el resultado de leer el tag.
+         * \details             Lo llama la tarea que lee el lector RFID; la pantalla de
+         *                      despacho reacciona desde su propia tarea al ver el cambio.
+         *                      Se ignora si la sesión ya no es la actual.
+         * \param p_session     Sesión en la que se leyó (get_tag_session()).
+         * \param p_detected    true: se lee un tag registrado, o el que inició el despacho.
+         * \param p_message     Motivo del rechazo (17 caracteres), o nullptr.
+         */
+        inline void set_tag_status(const uint8_t p_session, const bool p_detected, const char *p_message)
+        {
+            if(!this->m_tag_reading || p_session != this->m_tag_session)
+                return;
+
+            if(this->m_tag_detected == p_detected && this->m_tag_message == p_message)
+                return;
+
+            this->m_tag_detected = p_detected;
+            this->m_tag_message = p_message;
+            this->m_tag_message_changed = true;
+        }
+
+        /**
+         * \brief   Obtiene el motivo por el que se rechazó el último tag leído.
+         * \returns Mensaje a mostrar, o nullptr si no hay rechazo.
+         */
+        inline const char *get_tag_message() const
+        {
+            return this->m_tag_message;
+        }
+
+        /**
+         * \brief   Indica si el estado del tag cambió desde la última consulta y limpia la bandera.
+         * \returns true: Hay que volver a pintar el mensaje del tag.
+         */
+        inline bool tag_message_changed()
+        {
+            bool changed = this->m_tag_message_changed;
+            this->m_tag_message_changed = false;
+            return changed;
         }
 
         /**
@@ -381,12 +468,18 @@ class Screen : public I2C_Master_Device
         bool m_initialized = false;                   ///< Indica si la pantalla está inicializada.
         bool m_calibrating = false;                   ///< Indica si está en modo calibración.
         bool m_dispatching = false;                   ///< Indica si está en modo despacho.
-        bool m_tag_detected = false;                  ///< Indica si se detectó un tag RFID.
+        volatile bool m_tag_detected = false;         ///< Indica si se detectó un tag RFID registrado.
+        const char * volatile m_tag_message = nullptr; ///< Motivo del rechazo del último tag leído.
+        volatile bool m_tag_message_changed = false;  ///< Indica si el estado del tag cambió.
+        volatile bool m_tag_reading = false;          ///< La pantalla de despacho pidió leer el tag.
+        volatile uint8_t m_tag_session = 0;           ///< Sesión de lectura del tag.
         bool m_cabinet_state = false;                 ///< Estado del gabinete.
         float m_price = 0.0;                          ///< Precio actual.
         uint8_t m_brightness = 100;                   ///< Brillo actual.
         char* m_product = nullptr;                    ///< Producto actual.
         bool m_pic_changed = false;                   ///< Indica si la imagen ha cambiado.
+        uint8_t m_last_pic_counter = 0;               ///< Contador del estado en la última página enviada.
+        unsigned long m_last_pic_millis = 0;          ///< Momento en que se envió la última página.
 };
 
 /**

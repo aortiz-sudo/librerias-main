@@ -20,8 +20,19 @@ uint8_t rtc_data[7];                ///< Datos de fecha y hora.
 /**
  * @def   CMD_QUEUE_SIZE
  * @brief Tamaño de la cola circular de comandos I2C para evitar pérdida de comandos.
+ *
+ * La deteccion de cola llena es next_head == tail, asi que la capacidad real es
+ * CMD_QUEUE_SIZE - 1. Debe cubrir la rafaga que el ESP32 manda sin pausa en una
+ * sola iteracion de Screen_Task: 1 escritura de RTC (solo en pantallas sin RTC
+ * propio) + 3 de show_variables + 1 de display_touch + 1 de change_pic, mas una
+ * de set_brightness al salir del atenuado = 7 comandos.
+ *
+ * Con 4 (capacidad 3) la rafaga desbordaba y I2C_RxHandler descartaba los
+ * ultimos comandos. El mas perjudicado era change_pic, que va al final y no se
+ * reintenta (Screen::update limpia m_pic_changed antes de enviarlo), de modo que
+ * el cambio de pagina se perdia para siempre.
  */
-#define CMD_QUEUE_SIZE 4
+#define CMD_QUEUE_SIZE 8
 
 /**
  * @struct i2c_cmd_t

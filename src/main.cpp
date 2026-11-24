@@ -62,8 +62,9 @@ static EventGroupHandle_t suspend_task_group;
 
 /// Factor de calibración del caudalímetro.
 static float k_factor = 0.250f;
-/// Factor de corrección
-static float offset = 1.017915f;
+/// Ajuste fino del volumen (1.0 = sin ajuste). Antes, con 1.017915, compensaba el
+/// escurrimiento; ahora el escurrimiento se mide, y ese valor lo cobraría dos veces.
+static float offset = 1.0f;
 /// Precio del producto
 static float price = 20.0f;
 /// Brillo de la pantalla.
@@ -90,6 +91,40 @@ static status printer_status = Device::NO_DEVICE_ERROR;
 /// Contador de pulsos del caudalímetro.
 static volatile uint64_t flow_counter = 0;
 
+//========================= Escurrimiento y consola de calibración =========================//
+
+/// Se siguen contando pulsos después de cerrar las válvulas: el combustible que sigue
+/// pasando por el medidor mientras cierran y se detiene la bomba (escurrimiento).
+static volatile bool afterflow_active = false;
+/// millis() al cerrar las válvulas.
+static unsigned long afterflow_start_ms = 0;
+/// millis() del último pulso contado durante el escurrimiento.
+static unsigned long afterflow_last_pulse_ms = 0;
+/// Pulsos al cerrar las válvulas.
+static uint64_t afterflow_start_count = 0;
+/// Último valor del contador visto durante el escurrimiento.
+static uint64_t afterflow_last_count = 0;
+/// Indica si ya se midió algún escurrimiento desde el arranque.
+static bool afterflow_measured = false;
+/// El escurrimiento en curso es de una calibración (al terminar se muestra el total en pantalla).
+static bool afterflow_calibration = false;
+/// Pulsos del último escurrimiento medido.
+static uint32_t last_afterflow_pulses = 0;
+/// Duración (ms) del último escurrimiento medido, hasta su último pulso.
+static uint32_t last_afterflow_ms = 0;
+/// Pulsos del último vertido (despacho o calibración), para el comando "ajuste".
+static uint64_t last_pour_pulses = 0;
+/// Folio del último vertido si fue un despacho; 0 si fue una calibración.
+static uint32_t last_pour_ticket = 0;
+/// La consola de calibración está activa: solo en la pantalla de calibración.
+static bool calibration_console = false;
+/// Aviso de config_parameters() si al arrancar /Parametros.txt se restauró o se corrigió.
+static char parameters_note[96] = "";
+/// Tiempo mínimo (ms) que se cuenta el escurrimiento después de cerrar las válvulas.
+static unsigned long afterflow_min_ms = AFTERFLOW_MIN_MS;
+/// Pasado el mínimo, el escurrimiento termina tras este tiempo (ms) sin pulsos.
+static unsigned long afterflow_quiet_ms = AFTERFLOW_QUIET_MS;
+
 static bool trigger_fw_update[3] = { false, false, false };
 
 //========================= Configuración de Red =========================//
@@ -109,8 +144,15 @@ static IPAddress gateway(192, 168, 137, 1);
 /// Máscara de subred.
 static IPAddress subnet(255, 255, 255, 0);
 
-/// Puerto de comunicación.
-static uint16_t port = 443; // Puerto para comunicación segura (HTTPS).
+/// Puerto de comunicación con la plataforma (se lee de /Parametros.txt).
+static uint16_t port = 443;
+
+/**
+ * @brief Indica si las peticiones a la plataforma van cifradas.
+ * Con el puerto 443 se usa HTTPS; con cualquier otro (p. ej. 80) van por HTTP plano.
+ * Las descargas de firmware desde GitHub siempre usan HTTPS.
+ */
+static inline bool use_tls() { return port == 443; }
 
 //========================= Variables de Estado de Periféricos =========================//
 
@@ -132,14 +174,12 @@ static uint8_t last_display_rtc_sync_day = 0xFF;
 static float voltage = 12.0;
 /// Estado de gabinete abierto.
 static bool open_cabinet = false;
-/// Cadena para almacenar el tag RFID leído.
-static char str_tag[25] = "";
+/// Identificador del tag validado, entre comillas, tal como está registrado en la plataforma.
+static char str_tag[TAG_ID_SIZE + 2] = "";
 /// Bandera de despacho en curso.
 static bool dispatching = false;
 /// Bandera de calibración en curso.
 static bool calibrating = false;
-/// Bandera de lectura RFID realizada.
-static bool rfid_read   = false;
 /// Bandera de RTC listo.
 static bool rtc_ready   = false;
 /// Estado de la conexión del módulo Ethernet
@@ -200,6 +240,54 @@ static int user_ids[MAX_NUMBER_OF_USERS];
 static char *active_user = nullptr;
 static char *active_password = nullptr;
 static int user_index = 0;
+
+/// Usuario de la plataforma con acceso al equipo.
+struct user_record
+{
+  int id;
+  char password[USER_PSWD_SIZE];
+  char name[USER_NAME_SIZE];
+};
+
+/// Tag registrado en la plataforma para el cliente del dispositivo.
+struct tag_record
+{
+  int id;
+  char identifier[TAG_ID_SIZE];
+};
+
+/**
+ * Última lista de usuarios conocida (descargada, recibida por Socket.IO o leída
+ * de la SD). Se copia a user_ids/passwords/user_names en check_password(), sin
+ * sesión abierta, para que una descarga no cambie los datos del usuario activo
+ * a media sesión (tickets y eventos los leen por su índice).
+ */
+static user_record latest_users[MAX_NUMBER_OF_USERS] = {};
+static int latest_users_count = 0;
+static bool users_update_pending = false;
+
+/// Tags registrados. Sin lista (tags_available en false) no se permite despachar.
+static tag_record tags[MAX_NUMBER_OF_TAGS] = {};
+static int number_of_tags = 0;
+static bool tags_available = false;
+
+/// Resultado de buscar un tag leído en la lista de tags registrados.
+typedef enum : uint8_t
+{
+  TAG_REGISTERED,       ///< El tag está registrado: se puede despachar.
+  TAG_NOT_REGISTERED,   ///< Hay lista, pero el tag no está en ella.
+  TAG_NO_LIST           ///< No hay lista de tags descargada ni guardada en la SD.
+} tag_status_t;
+
+/// Mensajes de la pantalla de despacho cuando se rechaza un tag (17 caracteres).
+static const char *unregistered_tag_message = "Tag no registrado";
+static const char *no_tag_list_message      = "Sin lista de tags";
+
+/// Mutex para las listas de usuarios y tags (las usan las cuatro tareas).
+static SemaphoreHandle_t lists_mutex;
+
+/// Buffer para las respuestas de la plataforma. Solo lo usa HTTP_Task.
+static uint8_t platform_buffer[PLATFORM_BUFFER_SIZE];
 
 /// Parámetros que se imprimen en el ticket.
 static char *ticket_string_parameters[] =
@@ -277,7 +365,7 @@ static char api_key[72];
 static char ca_cert[CA_CERT_SIZE] = { 0 };
 static char data_endpoint[32] = "/api/data/";
 static char product_endpoint[32] = "/api/productos";
-static char tag_endpoint[32] = "/api/tag";
+static char tags_endpoint[32] = "/api/tags";
 static char device_endpoint[32] = "/api/dispositivos";
 static char users_endpoint[32] = "/api/usuarios?cliente=";
 
@@ -285,7 +373,6 @@ static char users_endpoint[32] = "/api/usuarios?cliente=";
 
 static char dispatches[MAX_NUMBER_OF_DISPATCHES][128] = { 0 };
 static ticket_struct tickets[MAX_NUMBER_OF_DISPATCHES] = { 0 };
-static user_json_struct users[MAX_NUMBER_OF_USERS] = {};
  
 //========================= Prototipos de Funciones =========================//
 
@@ -334,6 +421,34 @@ void config_github();
 void read_write_ios();
 /** @brief Controla el estado de los relevadores. @param p_relay_states Arreglo con el estado de cada relevador. */
 void relay_control(uint8_t p_relay_states[3]);
+/** @brief Carga de /escurrimiento.txt los tiempos del escurrimiento. */
+void config_afterflow();
+/** @brief Guarda en /escurrimiento.txt los tiempos del escurrimiento. */
+void save_afterflow_times();
+/** @brief Empieza a contar el escurrimiento al cerrar las válvulas (si no se estaba contando ya y no está desactivado). */
+void begin_afterflow();
+/** @brief Revisa, sin bloquear, si terminó el escurrimiento; si terminó, lo reporta. */
+void update_afterflow();
+/** @brief Espera a que termine el escurrimiento en curso. */
+void wait_afterflow();
+/** @brief Muestra en el campo "flujo medido" de la pantalla de calibración el total de pulsos × K × offset. */
+void show_calibration_total();
+/** @brief Guarda un factor en /Parametros.txt con 6 decimales. @param p_value Valor. @param p_position Renglón del parámetro (K_FACTOR_POS u OFFSET_POS). */
+void save_factor(float p_value, uint8_t p_position);
+/** @brief Escribe una línea en la consola de calibración, solo si está activa. @param p_text Texto. */
+void console_println(const char *p_text);
+/** @brief Reporta un dato de calibración en la consola y en el log. @param p_text Texto. */
+void calibration_report(const char *p_text);
+/** @brief Activa la consola en la pantalla de calibración y ahí silencia el resto del log. */
+void update_calibration_console();
+/** @brief Lee las líneas recibidas por el puerto serie y ejecuta los comandos de la consola. */
+void serial_commands();
+/** @brief Ejecuta un comando de la consola de calibración. @param p_line Línea recibida. */
+void process_console_command(char *p_line);
+/** @brief Muestra en la consola K, offset, el último vertido y el último escurrimiento. */
+void print_calibration_status();
+/** @brief Escribe en texto los tiempos del escurrimiento. @param p_text Buffer destino. @param p_size Tamaño del buffer. */
+void format_afterflow_times(char *p_text, size_t p_size);
 /** @brief Verifica si se solicitó un reinicio del sistema. */
 void check_reset();
 /** @brief Verifica el estado de conexión de la impresora. */
@@ -366,14 +481,38 @@ void check_updates();
 void send_last_events();
 /** @brief Gestiona la generación y envío de eventos del sistema. */
 void events();
-/** @brief Obtiene la lista de usuarios desde el servidor. */
-void get_users();
-/** @brief Procesa el JSON de usuarios recibido del servidor. @param p_json Cadena JSON. @param p_token Tokens del JSON. @param p_token_size Número de tokens. @param p_index Índice de inicio. */
-void parse_users(const char *p_json, jsmntok_t *p_token, int p_token_size, int p_index);
+/** @brief Descarga de la plataforma el cliente del dispositivo, los usuarios, los tags y el precio. @return true si se descargaron las listas de usuarios y de tags. */
+bool sync_platform_data();
+/** @brief Hace un GET a la plataforma y deja la respuesta en platform_buffer. @param p_endpoint Endpoint con su query string. @return Respuesta terminada en nulo, o nullptr si falló. */
+const char *platform_get(const char *p_endpoint);
+/** @brief Consulta el registro del dispositivo por su MAC y actualiza el id de cliente. @return true si el dispositivo está registrado. */
+bool sync_device();
+/** @brief Descarga los usuarios del cliente con acceso al equipo. @return true si la descarga fue válida. */
+bool sync_users();
+/** @brief Descarga los tags activos del cliente. @return true si la descarga fue válida. */
+bool sync_tags();
+/** @brief Descarga el producto del cliente y actualiza su nombre y precio. @return true si se encontró el producto. */
+bool sync_product();
+/** @brief Carga los tags guardados en la tarjeta SD. */
+void config_tags();
+/** @brief Copia la última lista de usuarios a las listas de inicio de sesión. Solo se llama sin sesión abierta. */
+void apply_pending_users();
+/** @brief Reescribe /usuarios.txt con la última lista de usuarios y actualiza su número en /Parametros.txt. */
+void save_users_to_sd();
+/** @brief Reescribe /tags.txt con la lista de tags. */
+void save_tags_to_sd();
+/** @brief Busca un tag leído en la lista de tags registrados. @param p_tag Tag leído. @param p_identifier Buffer para el identificador registrado. @param p_identifier_size Tamaño del buffer. @return Resultado de la búsqueda. */
+tag_status_t find_tag(const char *p_tag, char *p_identifier, size_t p_identifier_size);
+/** @brief Compara dos identificadores de tag (los numéricos por valor). @return true si son el mismo tag. */
+bool same_tag(const char *p_tag_a, const char *p_tag_b);
+/** @brief Busca el nombre de un usuario por su id. @param p_user_id Id del usuario. @return Nombre del usuario, o cadena vacía si no está. */
+const char *user_name_by_id(int p_user_id);
 /** @brief Construye la cadena con la información de un despacho. @param p_dispatch_str Buffer destino. @param p_liters Litros despachados. */
 void build_dispatch_string(char p_dispatch_str[160], float p_liters);
 /** @brief Revisa los despachos guardados en la tarjeta SD. @param init Indica si es la inicialización. */
 void check_dispatches(bool init = false);
+/** @brief Sube el folio al del último despacho guardado si el de /Parametros.txt quedó atrás. */
+void sync_ticket_number();
 /** @brief Copia un archivo a su ubicación de respaldo. @param p_main_path Ruta del archivo original. @param p_backup_path Ruta del respaldo. */
 void copy_backup(const char *p_main_path, const char *p_backup_path);
 /** @brief Construye la estructura de un ticket a partir de la cadena de despacho. @param p_ticket Estructura de ticket destino. @param p_dispatch_str Cadena con los datos del despacho. @param p_rtc Datos de fecha y hora. */
@@ -446,7 +585,7 @@ state_callback_function state_callback_functions[14]
 void IRAM_ATTR isr_flowmeter_pin_1()
 {
   //portENTER_CRITICAL_ISR(&flow_counter_spinlock);
-  if(dispatching || calibrating)
+  if(dispatching || calibrating || afterflow_active)
     flow_counter++;
   //portEXIT_CRITICAL_ISR(&flow_counter_spinlock);
 }
@@ -457,7 +596,7 @@ void IRAM_ATTR isr_flowmeter_pin_1()
 void IRAM_ATTR isr_flowmeter_pin_2()
 {
   //portENTER_CRITICAL_ISR(&flow_counter_spinlock);
-  if(dispatching || calibrating)
+  if(dispatching || calibrating || afterflow_active)
     flow_counter++;
   //portEXIT_CRITICAL_ISR(&flow_counter_spinlock);
 }
@@ -467,7 +606,7 @@ void IRAM_ATTR isr_flowmeter_pin_2()
  */
 /*void IRAM_ATTR isr_flowmeter_pin_3()
 {
-  if(dispatching || calibrating)
+  if(dispatching || calibrating || afterflow_active)
     flow_counter++;
 }*/
 
@@ -507,7 +646,6 @@ void General_Task(void *pvParameters)
       vTaskSuspend(NULL);
     }
 
-    read_write_ios();
     events();
     get_lls_data();
     get_rfid_data();
@@ -543,8 +681,10 @@ void HTTP_Task(void *pvParameters)
     http_client->set_certificate(ca_cert);
 
   unsigned long last_millis = 0;
-  unsigned long last_request_user_millis = 0;
-  
+  unsigned long last_sync_millis = 0;
+  unsigned long sync_interval = 0;
+  bool sync_attempted = false;
+
   while(true)
   {
     EventBits_t trigger_bit = xEventGroupGetBits(suspend_task_group);
@@ -562,11 +702,19 @@ void HTTP_Task(void *pvParameters)
     check_events();
     check_updates();
 
-    if(current_millis - last_request_user_millis > 90000)
+    // Descarga de cliente, usuarios, tags y precio: en cuanto hay red después de
+    // encender y luego cada 24 h. Si falla se reintenta cada 5 min; mientras
+    // tanto se usan las listas guardadas en la SD.
+    if(ethernet_begin && (!sync_attempted || current_millis - last_sync_millis >= sync_interval))
     {
-      get_users();
+      bool synced = sync_platform_data();
 
-      last_request_user_millis = current_millis;
+      sync_interval = synced ? PLATFORM_SYNC_INTERVAL_MS : PLATFORM_SYNC_RETRY_MS;
+      last_sync_millis = millis();
+      sync_attempted = true;
+
+      logger.logln(synced ? "Datos de la plataforma actualizados; la siguiente descarga es en 24 h."
+                          : "No se pudieron descargar los datos de la plataforma; se reintenta en 5 min.");
     }
 
     if(current_millis - last_millis > 60000)
@@ -698,20 +846,32 @@ void Screen_Task(void *pvParameters)
     unsigned long now = millis();
     if(now - last_rtc_update >= 500)
     {
-      // Solo se refresca rtc_data (tickets, JSON, logs). La pantalla pinta la
-      // hora desde su propio RTC de hardware, por lo que NO se le escribe en
-      // cada ciclo: hacerlo competía con el RTC interno y causaba parpadeo.
-      update_display_rtc(false);
+      // Con RTC propio solo se refresca rtc_data (tickets, JSON, logs) y la hora
+      // la pinta la pantalla desde su reloj interno: escribirle en cada ciclo
+      // competía con ese RTC y causaba parpadeo. Sin RTC propio es al revés,
+      // el MCU es el único que puede repintar la hora en cada ciclo.
+      update_display_rtc(!DISPLAY_HAS_INTERNAL_RTC);
 
-      // Resincronización puntual una vez al día, para corregir la deriva entre
-      // el DS3231 y el RTC interno de la pantalla.
-      if(last_display_rtc_sync_day != rtc_data[RTC_DAY_INDEX])
-        sync_display_rtc();
+      // Resincronización puntual una vez al día: solo aplica cuando la pantalla
+      // mantiene la hora por sí misma, para corregir la deriva contra el DS3231.
+      if constexpr (DISPLAY_HAS_INTERNAL_RTC)
+      {
+        if(last_display_rtc_sync_day != rtc_data[RTC_DAY_INDEX])
+          sync_display_rtc();
+      }
 
       last_rtc_update = now;
     }
 
     manage_screen(key);
+
+    // Los relés se aplican aquí y no en General_Task: esa tarea lee el tag durante el
+    // despacho y cada lectura la bloquea de 100 a 200 ms, lo que retrasaría el corte
+    // al llegar a la cantidad o al dejar de leer el tag.
+    read_write_ios();
+
+    update_calibration_console();
+    serial_commands();
 
     if(pending_print)
     {
@@ -728,6 +888,13 @@ void Screen_Task(void *pvParameters)
  */
 void setup()
 {
+  // En release el log va a la SD y nadie abre el puerto serie: se abre para la consola
+  // de calibración, que solo escribe en la pantalla de calibración. En depuración ya lo
+  // abre el logger.
+  #ifndef debug_mode
+    Serial.begin(115200);
+  #endif
+
   config_io_pins();
   //Wire.setBufferSize(256);
   Wire.begin(SDA_PIN, SCL_PIN);
@@ -738,7 +905,10 @@ void setup()
   update_display_rtc(false);
   config_logger();
   config_parameters();
+  config_afterflow();
+  sync_ticket_number();
   config_users();
+  config_tags();
   read_api_key();
   read_ca_cert();
   config_github();
@@ -804,6 +974,9 @@ void initial(uint8_t *p_info, int args)
 void check_password(uint8_t *p_password, int args)
 {
   bool correct_password = false;
+
+  // Aquí no hay sesión abierta: es el momento seguro para usar la última lista.
+  apply_pending_users();
 
   for(int i = 0; i < number_of_users; i++)
   {
@@ -912,14 +1085,21 @@ void execute_print_ticket()
       return;
     }
 
+    // dispatches[] y tickets[] tienen MAX_NUMBER_OF_DISPATCHES renglones.
+    if(lines > MAX_NUMBER_OF_DISPATCHES)
+    {
+      logger.logln("Hay mas despachos de los que caben en el ticket del dia; se imprimen los primeros.");
+      lines = MAX_NUMBER_OF_DISPATCHES;
+    }
+
     logger.logln("Imprimiendo ticket del dia...");
 
     if(lines > 0)
     {
+      // Prefijo "año;mes;día;" del registro, igual que en check_dispatches().
       char date[16];
-      snprintf(date, sizeof(date), "%u;%u;%u", rtc_data[RTC_YEAR_INDEX], rtc_data[RTC_MONTH_INDEX], rtc_data[RTC_DAY_INDEX]);
-
-      date[sizeof(date) - 1] = '\0';
+      snprintf(date, sizeof(date), "%u;%u;%u;", rtc_data[RTC_YEAR_INDEX], rtc_data[RTC_MONTH_INDEX], rtc_data[RTC_DAY_INDEX]);
+      size_t date_length = strlen(date);
 
       if(!get_dispatches(dispatches, lines))
       {
@@ -930,7 +1110,7 @@ void execute_print_ticket()
       size_t counter = 0;
       for(int i = 0; i < lines; i++)
       {
-        if(string_contains(dispatches[i], date))
+        if(strncmp(dispatches[i], date, date_length) == 0)
           counter++;
       }
 
@@ -938,10 +1118,14 @@ void execute_print_ticket()
       {
         int ticket_counter = 0;
 
+        // build_ticket() escribe en este arreglo la fecha y hora de cada despacho.
+        // Con rtc_data pisaba el reloj que usan los eventos mientras se imprimía.
+        uint8_t dispatch_rtc[7];
+
         for(int i = 0; i < lines; i++)
         {
-          if(string_contains(dispatches[i], date))
-            build_ticket(&tickets[ticket_counter++], dispatches[i], rtc_data);
+          if(strncmp(dispatches[i], date, date_length) == 0)
+            build_ticket(&tickets[ticket_counter++], dispatches[i], dispatch_rtc);
         }
 
         printing = true;
@@ -961,9 +1145,14 @@ void execute_print_ticket()
  * de combustible medido.
  * 
  * @param p_calibration_data  Puntero a los datos de calibración.
- * @param args                Que accion realizar. 
- *                            0: Obtener volumen. 
- *                            1: Calibrar con volumen dado.
+ * @param args                Acción a realizar:
+ *                            0: Abrir las válvulas (enciende los relés) para llenar el patrón.
+ *                            1: Leer el volumen medido (pulsos × factor K × offset, igual que
+ *                               el despacho).
+ *                            2: Esperar a que termine el escurrimiento, calcular el factor K
+ *                               con el volumen patrón recibido y guardarlo en la SD. Con
+ *                               patrón 0 solo cancela.
+ *                            3: Cerrar las válvulas (detener).
  */
 void calibrate(uint8_t *p_calibration_data, int args)
 {
@@ -972,15 +1161,18 @@ void calibrate(uint8_t *p_calibration_data, int args)
   switch(args)
   {
     case 0:
-    {  
+    {
       uint8_t current_relay_states[3] = { RELAY_ON, RELAY_ON, RELAY_ON };
       xQueueSend(Relay_Queue, (void *)&current_relay_states[0], pdMS_TO_TICKS(10));
+      calibration_report("Calibracion: valvulas abiertas.");
       break;
     }
 
     case 1:
     {
-      *volume = flow_counter * k_factor;
+      // Misma fórmula que el despacho: la pantalla de calibración marca lo mismo que
+      // marcaría un despacho con esos pulsos.
+      *volume = flow_counter * k_factor * offset;
       break;
     }
 
@@ -989,21 +1181,43 @@ void calibrate(uint8_t *p_calibration_data, int args)
       uint8_t current_relay_states[3] = { RELAY_OFF, RELAY_OFF, RELAY_OFF };
       xQueueSend(Relay_Queue, (void *)&current_relay_states[0], pdMS_TO_TICKS(10));
 
-      if(*volume <= 0.0f)
-        return;
+      // El escurrimiento empezó a contarse al detener. El patrón incluye lo que salió
+      // después de cerrar, así que los pulsos también deben incluirlo.
+      wait_afterflow();
 
-      k_factor = (*volume) / (float)(flow_counter);
-      logger.logln(k_factor, 6);
-
-      char k_factor_str[15];
-      uint32_t k_factor_int = (uint32_t)k_factor;
-      uint32_t k_factor_dec = (uint32_t)((k_factor - k_factor_int) * 1000000.0f);
-      snprintf(k_factor_str, sizeof(k_factor_str), "%u.%06u", k_factor_int, k_factor_dec);
-      k_factor_str[sizeof(k_factor_str) - 1] = '\0';
-
-      build_sd_info(PARAMETERS_PATH, k_factor_str, SAVE_GENERAL_PARAMETER, K_FACTOR_POS);
-
+      // Los pulsos de la calibración no son de ningún despacho, así que se descartan
+      // también al cancelar (patrón en 0): antes se quedaban en el contador y el
+      // siguiente despacho arrancaba con esos litros. Quedan como último vertido para
+      // el comando "ajuste" de la consola.
+      uint64_t pulses = flow_counter;
       flow_counter = 0;
+      last_pour_pulses = pulses;
+      last_pour_ticket = 0;
+
+      if(*volume <= 0.0f)
+      {
+        calibration_report("Calibracion cancelada: no se capturo el volumen patron.");
+        return;
+      }
+
+      // Sin pulsos el factor K saldría infinito y se guardaría en la SD: todos los
+      // despachos marcarían NaN y el despacho por cantidad ya no se detendría solo.
+      if(pulses == 0)
+      {
+        calibration_report("Calibracion cancelada: el caudalimetro no registro pulsos.");
+        return;
+      }
+
+      // Con el offset, para que pulsos × K × offset dé exactamente el patrón.
+      float old_k_factor = k_factor;
+      k_factor = (*volume) / ((float)pulses * offset);
+
+      char text[128];
+      snprintf(text, sizeof(text), "Calibracion: patron %.2f L, %u pulsos. K %.6f -> %.6f (%+.2f %%)",
+               *volume, (unsigned)pulses, old_k_factor, k_factor, (k_factor / old_k_factor - 1.0f) * 100.0f);
+      calibration_report(text);
+
+      save_factor(k_factor, K_FACTOR_POS);
       break;
     }
 
@@ -1011,6 +1225,20 @@ void calibrate(uint8_t *p_calibration_data, int args)
     {
       uint8_t current_relay_states[3] = { RELAY_OFF, RELAY_OFF, RELAY_OFF };
       xQueueSend(Relay_Queue, (void *)&current_relay_states[0], pdMS_TO_TICKS(10));
+
+      // La pantalla también pasa por aquí al confirmar o al salir; solo se reporta
+      // cuando de verdad se cierran las válvulas.
+      if(calibrating)
+      {
+        char text[96];
+        snprintf(text, sizeof(text), "Calibracion detenida: %u pulsos = %.2f L. Midiendo escurrimiento...",
+                 (unsigned)flow_counter, flow_counter * k_factor * offset);
+        calibration_report(text);
+
+        // La pantalla deja de actualizarse al detener: se le pasan los pulsos que llegaron
+        // desde su última lectura, y al terminar el escurrimiento, el total.
+        show_calibration_total();
+      }
       break;
     }
   }
@@ -1027,9 +1255,10 @@ void calibrate(uint8_t *p_calibration_data, int args)
  *                          0: Iniciar despacho (enciende los relés) y leer el volumen inicial.
  *                          1: Leer el volumen despachado.
  *                          2: Detener el despacho (apaga los relés).
- *                          3: Finalizar el despacho: incrementa el folio, genera el evento,
- *                             guarda en SD, imprime el ticket, persiste el folio y reinicia el contador de pulsos.
- *                          4: Reducir el caudal (patrón de relés intermedio) y leer el volumen.
+ *                          3: Finalizar el despacho: corta los relés, espera a que termine el
+ *                             escurrimiento y toma la lectura final; incrementa el folio, genera
+ *                             el evento, guarda en SD, imprime el ticket, persiste el folio y
+ *                             reinicia el contador de pulsos.
  */
 void dispatch(uint8_t *p_dispatch_volume, int args)
 {
@@ -1064,16 +1293,40 @@ void dispatch(uint8_t *p_dispatch_volume, int args)
 
     case 3:
     {
+      // Corte inmediato: al llegar a la cantidad, el despacho termina aquí con las válvulas
+      // abiertas, y la cola de relés no se aplicaría hasta después de la espera.
       uint8_t current_relay_states[3] = { RELAY_OFF, RELAY_OFF, RELAY_OFF };
-      float *dispatched_volume = (float *)p_dispatch_volume;
-      float liters = *dispatched_volume;
+      relay_control(current_relay_states);
+      logger.logln("Despacho detenido");
 
-      if(xQueueSend(Relay_Queue, (void *)&current_relay_states[0], pdMS_TO_TICKS(10)) == pdTRUE)
-        logger.logln("Despacho detenido");
+      if(dispatching)
+        begin_afterflow();
+
+      dispatching = false;
+
+      // El ticket espera a que el medidor deje de dar pulsos: así incluye lo que salió
+      // después de cerrar las válvulas, en esta y en cada pausa del despacho.
+      wait_afterflow();
+
+      uint64_t pulses = flow_counter;
+      float *dispatched_volume = (float *)p_dispatch_volume;
+      float liters = pulses * k_factor * offset;
+      *dispatched_volume = liters;
+
+      // Litros e importe finales en la pantalla, los mismos del ticket.
+      uint32_t int_dispatched_liters = (uint32_t)(liters * 100);
+      uint32_t int_dispatched_cost = (uint32_t)(liters * price * 100);
+      screen->write_to_address(DISPLAY_DISPATCHED_VOLUME_ADDRESS, (uint8_t *)&int_dispatched_liters, sizeof(uint32_t), true);
+      screen->write_to_address(DISPLAY_DISPATCHED_COST_ADDRESS, (uint8_t *)&int_dispatched_cost, sizeof(uint32_t), true);
 
       ticket_number++;
 
-      trigger_event(FUEL_DISPATCHED, true, liters, screen->get_tag_detected());
+      last_pour_pulses = pulses;
+      last_pour_ticket = ticket_number;
+
+      // El despacho solo arranca con un tag registrado, así que el evento siempre
+      // lleva su tag, aunque se termine en pausa porque ya no se leía.
+      trigger_event(FUEL_DISPATCHED, true, liters, true);
       char str_dispatch[160];
       build_dispatch_string(str_dispatch, liters);
 
@@ -1087,16 +1340,6 @@ void dispatch(uint8_t *p_dispatch_volume, int args)
       build_sd_info(PARAMETERS_PATH, str_ticket_number, SAVE_GENERAL_PARAMETER, TICKET_NUMBER_POS);
 
       flow_counter = 0;
-      break;
-    }
-
-    case 4:
-    {
-      float *dispatched_volume = (float *)p_dispatch_volume;
-      *dispatched_volume = flow_counter * k_factor * offset;
-
-      uint8_t current_relay_states[3] = { RELAY_ON, RELAY_OFF, RELAY_ON };
-      xQueueSend(Relay_Queue, (void *)&current_relay_states[0], pdMS_TO_TICKS(10));
       break;
     }
   }
@@ -1139,10 +1382,12 @@ void price_info(uint8_t *p_price_info, int args)
     float new_price = *(float *)p_price_info;
     price = new_price;
     char price_str[10];
-    uint8_t price_int = (uint8_t)new_price;
-    uint8_t price_dec = (uint8_t)((new_price - price_int) * 100);
 
-    snprintf(price_str, sizeof(price_str), "%u.%u", price_int, price_dec);
+    // "%.2f" redondea al centavo. Antes se separaba entero y decimales con "%u.%u":
+    // al truncar el float se perdía un centavo (23.57 -> "23.56") y faltaba el cero
+    // a la izquierda (23.05 -> "23.4", que se lee como 23.40). Este texto va a la SD
+    // y al servidor, así que tras reiniciar la bomba cobraba el precio equivocado.
+    snprintf(price_str, sizeof(price_str), "%.2f", new_price);
     price_str[sizeof(price_str) - 1] = '\0';
 
     build_sd_info(PARAMETERS_PATH, price_str, SAVE_GENERAL_PARAMETER, PRICE_POS);
@@ -1316,6 +1561,16 @@ void manage_screen(char p_key)
 
   printer_status = printer->read_peripehal_data(&voltage, &sat_out, &printer_connected);
 
+  if(current_screen_state == INITIAL_SCREEN_STATE)
+    check_firmware_triggers();
+
+  // El cambio de pagina se envia ANTES de la telemetria: change_pic es un
+  // comando de una sola oportunidad (Screen::update limpia m_pic_changed al
+  // enviarlo) mientras que los valores de show_variables son idempotentes y se
+  // reescriben cada 500 ms. Si la cola del ATmega llegara a llenarse, conviene
+  // que lo que se pierda sea un valor repetible y no el cambio de pantalla.
+  display_status = screen->update(p_key);
+
   static unsigned long last_variables_update = 0;
   unsigned long vars_now = millis();
   if(vars_now - last_variables_update >= 500)
@@ -1323,11 +1578,6 @@ void manage_screen(char p_key)
     show_variables();
     last_variables_update = vars_now;
   }
-
-  if(current_screen_state == INITIAL_SCREEN_STATE)
-    check_firmware_triggers();
-
-  display_status = screen->update(p_key);
 
   /* if(printer_status != Printer::NO_DEVICE_ERROR)
     printer->start_device();
@@ -1383,30 +1633,53 @@ void update_display_rtc(bool p_display_write)
 /**
  * @brief Sincroniza el RTC interno de la pantalla con el RTC del sistema.
  *
- * Escribe en el registro RTC_Set (0x009C) de la pantalla, que ajusta su RTC de
- * hardware una sola vez. A partir de ese momento la pantalla mantiene la hora
- * por sí misma (supercapacitor) y el control "Text RTC" de DGUS la pinta sin
- * intervención del MCU.
+ * El registro y la cadencia dependen de DISPLAY_HAS_INTERNAL_RTC (ver main.h):
  *
- * Es deliberadamente una operación PUNTUAL: no debe llamarse de forma periodica.
- * Antes se escribía cada 500 ms en el registro de lectura 0x0010, que el núcleo
- * de la GUI reescribe desde el RTC de hardware en cada refresco; esa carrera era
- * la causa del parpadeo entre la hora enviada y la del RTC interno.
+ * - Pantalla CON RTC propio (envs esp32*): escribe en RTC_Set (0x009C), que
+ *   ajusta el RTC de hardware una sola vez. A partir de ahí la pantalla mantiene
+ *   la hora por sí misma (supercapacitor) y el control "Text RTC" de DGUS la
+ *   pinta sin intervención del MCU, así que esta es una operación PUNTUAL:
+ *   arranque, cambio manual de hora y una resincronización diaria. Escribirle
+ *   cada 500 ms en 0x0010, como se hacía antes, competía con el RTC de hardware
+ *   (el núcleo de la GUI reescribe ese registro en cada refresco) y era la
+ *   causa del parpadeo entre la hora enviada y la del RTC interno.
  *
- * Formato (4 words / 8 bytes): 0x5AA5 + año, mes, día, hora, minuto, segundo,
- * en valores BINARIOS (no BCD) y sin byte de día de la semana, que DGUS calcula.
- * Trama: 5A A5 0B 82 00 9C 5A A5 AA MM DD hh mm ss
+ * - Pantalla SIN RTC (envs esp32*_legacy): escribe en 0x0010, el único registro
+ *   que acepta escritura en ese hardware. Ahí no hay con quien competir, pero
+ *   tampoco hay reloj que avance solo, de modo que el bucle de 500 ms la llama
+ *   en cada ciclo para repintar la hora.
+ *
+ * En ambos casos los valores van en BINARIO (no BCD): año 2026 -> 0x1A.
  */
 void sync_display_rtc()
 {
-  uint8_t rtc_set[] =
+  if constexpr (DISPLAY_HAS_INTERNAL_RTC)
   {
-    (uint8_t)(ENABLE_RTC_SET_CMD >> 8), (uint8_t)(ENABLE_RTC_SET_CMD & 0xFF),
-    rtc_data[RTC_YEAR_INDEX], rtc_data[RTC_MONTH_INDEX], rtc_data[RTC_DAY_INDEX],
-    rtc_data[RTC_HOUR_INDEX], rtc_data[RTC_MINUTE_INDEX], rtc_data[RTC_SECOND_INDEX]
-  };
+    // RTC_Set (0x009C), 4 words: 0x5AA5 + año, mes, día, hora, minuto y segundo,
+    // sin byte de día de la semana porque DGUS lo calcula.
+    // Trama: 5A A5 0B 82 00 9C 5A A5 AA MM DD hh mm ss
+    uint8_t rtc_set[] =
+    {
+      (uint8_t)(ENABLE_RTC_SET_CMD >> 8), (uint8_t)(ENABLE_RTC_SET_CMD & 0xFF),
+      rtc_data[RTC_YEAR_INDEX], rtc_data[RTC_MONTH_INDEX], rtc_data[RTC_DAY_INDEX],
+      rtc_data[RTC_HOUR_INDEX], rtc_data[RTC_MINUTE_INDEX], rtc_data[RTC_SECOND_INDEX]
+    };
 
-  display_status = screen->write_to_address(DISPLAY_RTC_SET_ADDRESS, rtc_set, sizeof(rtc_set));
+    display_status = screen->write_to_address(DISPLAY_RTC_SET_ADDRESS, rtc_set, sizeof(rtc_set));
+  }
+  else
+  {
+    // Registro 0x0010, 4 words: año, mes, día, semana, hora, minuto, segundo y
+    // un byte sin usar. rtc_data ya tiene ese orden (índice 3 = semana, se queda
+    // en 0 y DGUS la calcula); solo falta el relleno D0 para cerrar las 4 words.
+    // Trama: 5A A5 0B 82 00 10 AA MM DD 00 hh mm ss 00
+    uint8_t rtc_now[8] = { 0 };
+
+    memcpy(rtc_now, rtc_data, sizeof(rtc_data));
+
+    display_status = screen->write_to_address(DISPLAY_RTC_ADDRESS, rtc_now, sizeof(rtc_now));
+  }
+
   last_display_rtc_sync_day = rtc_data[RTC_DAY_INDEX];
 }
 
@@ -1419,36 +1692,81 @@ void sync_display_rtc()
  */
 void config_parameters()
 {
-  int lines = get_number_of_lines(PARAMETERS_PATH);
+  int lines = count_lines(PARAMETERS_PATH);
 
-  if(lines != 21)
+  // Solo se restaura el respaldo si al archivo le faltan renglones: no existe, o un corte
+  // de luz lo dejó a medias al reescribirlo. Antes se restauraba siempre que no tuviera
+  // exactamente 21 saltos de línea: con un renglón vacío de más, o sin el salto final,
+  // cada arranque tiraba lo guardado (factor K, precio, folio...). A medianoche el
+  // respaldo se copia del principal, así que heredaba el mismo defecto y nunca se salía.
+  if(lines < PARAMETERS_LINES)
   {
-    copy_backup(PARAMETERS_PATH, PARAMETERS_BACKUP_PATH);
-    lines = get_number_of_lines(PARAMETERS_PATH);
+    if(count_lines(PARAMETERS_BACKUP_PATH) >= PARAMETERS_LINES)
+    {
+      copy_backup(PARAMETERS_PATH, PARAMETERS_BACKUP_PATH);
+      lines = count_lines(PARAMETERS_PATH);
+      snprintf(parameters_note, sizeof(parameters_note), "/Parametros.txt estaba incompleto: se restauro del respaldo.");
+    }
+    else
+      snprintf(parameters_note, sizeof(parameters_note), "/Parametros.txt tiene %d renglones de %d y el respaldo no sirve.",
+               lines < 0 ? 0 : lines, PARAMETERS_LINES);
   }
 
-  char sd_parameters[21][128];
+  // read_file() no revisa el tamaño del buffer: no se leen más renglones de los que caben.
+  if(lines > PARAMETERS_LINES)
+    lines = PARAMETERS_LINES;
 
-  if(read_file(PARAMETERS_PATH, sd_parameters, lines, '\n'))
+  char sd_parameters[PARAMETERS_LINES][128] = {};
+  int read = lines > 0 ? read_file(PARAMETERS_PATH, sd_parameters, lines, '\n') : 0;
+
+  // Si sobran renglones o al último le falta el salto de línea, se reescribe con los 21
+  // para que los guardados y el siguiente arranque lo encuentren completo.
+  if(read == PARAMETERS_LINES && get_number_of_lines(PARAMETERS_PATH) != PARAMETERS_LINES)
   {
-    for(int i = 0; i < 10; i++)
+    if(write_lines(PARAMETERS_PATH, sd_parameters, PARAMETERS_LINES))
+      snprintf(parameters_note, sizeof(parameters_note), "/Parametros.txt no tenia 21 renglones exactos: se corrigio.");
+  }
+
+  if(parameters_note[0] != '\0')
+    logger.logln(parameters_note);
+
+  if(read > 0)
+  {
+    // Si el archivo quedó incompleto, los renglones que faltan conservan su valor por defecto.
+    auto has = [read](int p_position) { return p_position < read; };
+
+    for(int i = 0; i < 10 && has(i); i++)
     {
       memset(parameters[i], '\0', parameters_sizes[i]);
       strncpy((char *)parameters[i], (const char *)sd_parameters[i], parameters_sizes[i] - 1);
       parameters[i][parameters_sizes[i] - 1] = '\0';
     }
 
-    number_of_users = atoi((const char *)sd_parameters[NUMBER_OF_USERS_POS]);
-    ticket_number = atoi((const char *)sd_parameters[TICKET_NUMBER_POS]);
-    max_fuel_level = atoi((const char *)sd_parameters[MAX_FUEL_LEVEL_POS]);
-    price = atof((const char *)sd_parameters[PRICE_POS]);
-    brightness = atoi((const char *)sd_parameters[BRIGHTNESS_POS]);
-    k_factor = atof((const char *)sd_parameters[K_FACTOR_POS]);
-    lls_ascii = atoi((const char *)sd_parameters[LLS_ASCII_POS]);
-    port = atoi((const char *)sd_parameters[PORT_POS]);
-    offset = atof((const char *)sd_parameters[OFFSET_POS]);
-    client_id = atoi((const char *)sd_parameters[CLIENT_ID_POS]);
-    product_id = atoi((const char *)sd_parameters[PRODUCT_ID_POS]);
+    if(has(NUMBER_OF_USERS_POS)) number_of_users = atoi((const char *)sd_parameters[NUMBER_OF_USERS_POS]);
+    if(has(TICKET_NUMBER_POS))   ticket_number = atoi((const char *)sd_parameters[TICKET_NUMBER_POS]);
+    if(has(MAX_FUEL_LEVEL_POS))  max_fuel_level = atoi((const char *)sd_parameters[MAX_FUEL_LEVEL_POS]);
+    if(has(PRICE_POS))           price = atof((const char *)sd_parameters[PRICE_POS]);
+    if(has(BRIGHTNESS_POS))      brightness = atoi((const char *)sd_parameters[BRIGHTNESS_POS]);
+    if(has(LLS_ASCII_POS))       lls_ascii = atoi((const char *)sd_parameters[LLS_ASCII_POS]);
+    if(has(PORT_POS))            port = atoi((const char *)sd_parameters[PORT_POS]);
+    if(has(CLIENT_ID_POS))       client_id = atoi((const char *)sd_parameters[CLIENT_ID_POS]);
+    if(has(PRODUCT_ID_POS))      product_id = atoi((const char *)sd_parameters[PRODUCT_ID_POS]);
+
+    // El factor K y el offset se ajustan a mano en la SD. Un renglón vacío o con
+    // texto daba 0: el despacho marcaba 0 L y el despacho por cantidad ya no se
+    // detenía solo. Si no es un número positivo se conserva el valor por defecto.
+    float sd_k_factor = atof((const char *)sd_parameters[K_FACTOR_POS]);
+    float sd_offset = atof((const char *)sd_parameters[OFFSET_POS]);
+
+    if(std::isfinite(sd_k_factor) && sd_k_factor > 0.0f)
+      k_factor = sd_k_factor;
+    else
+      logger.logln("Factor K invalido en /Parametros.txt; se usa el valor por defecto.");
+
+    if(std::isfinite(sd_offset) && sd_offset > 0.0f)
+      offset = sd_offset;
+    else
+      logger.logln("Offset invalido en /Parametros.txt; se usa el valor por defecto.");
   }
 
   for(int i = 0; i < 10; i++)
@@ -1467,15 +1785,60 @@ void config_parameters()
   logger.logln(product_id);
 }
 
+/**
+ * @brief Evita repetir folios después de un reinicio.
+ *
+ * El folio solo se guarda en /Parametros.txt y ese renglón puede volver a un valor
+ * anterior: el archivo se restaura del respaldo (que solo se actualiza al cambiar
+ * de día) cuando no tiene 21 renglones, se puede editar a mano, y si el equipo se
+ * reinicia justo después de un despacho la cola de la SD alcanza a guardar el
+ * despacho pero no el folio. /Despachos.txt siempre conserva al menos el último
+ * despacho, así que el folio nunca debe quedar por debajo del suyo.
+ */
+void sync_ticket_number()
+{
+  char last_dispatch[128] = "";
+
+  if(get_last_dispatch(last_dispatch) != 1)
+    return;
+
+  char dispatch_data[14][64] = { 0 };
+
+  if(split_string(last_dispatch, dispatch_data, 14, ';') < 14)
+    return;
+
+  uint32_t last_ticket_number = strtoul(dispatch_data[12], nullptr, 10);
+
+  if(last_ticket_number <= ticket_number)
+    return;
+
+  logger.log("El folio guardado (");
+  logger.log(ticket_number);
+  logger.log(") es menor que el del ultimo despacho; se continua desde ");
+  logger.logln(last_ticket_number);
+
+  ticket_number = last_ticket_number;
+
+  // Todavía no existen las tareas ni la cola de la SD: se guarda directo.
+  char str_ticket_number[12];
+  snprintf(str_ticket_number, sizeof(str_ticket_number), "%u", ticket_number);
+
+  const char *param = str_ticket_number;
+  uint8_t position = TICKET_NUMBER_POS;
+  save_parameter(PARAMETERS_PATH, &param, &position, 1);
+}
+
 void config_users()
 {
   int lines = get_number_of_lines(USERS_PATH);
 
   if(lines != number_of_users && !SD.exists(USERS_PATH))
-  { 
+  {
     strncpy(user_names[0], "Usuario temporal", USER_NAME_SIZE);
     strncpy(passwords[0], "1234", USER_PSWD_SIZE);
     user_ids[0] = -1;
+    // Sin esto check_password() no lo recorría si /Parametros.txt decía 0 usuarios.
+    number_of_users = 1;
 
     return;
   }
@@ -1485,28 +1848,91 @@ void config_users()
     lines = get_number_of_lines(USERS_PATH);
   }
 
+  // read_file() no revisa el tamaño del buffer: no se leen más líneas de las que caben.
+  if(lines > MAX_NUMBER_OF_USERS)
+    lines = MAX_NUMBER_OF_USERS;
+
   char sd_user_lines[MAX_NUMBER_OF_USERS][128];
+  int read_lines = lines > 0 ? read_file(USERS_PATH, sd_user_lines, lines, '\n') : 0;
 
-  if(read_file(USERS_PATH, sd_user_lines, lines, '\n'))
+  if(read_lines < 0)
+    read_lines = 0;
+
+  for(int i = 0; i < read_lines; i++)
   {
-    for(int i = 0; i < lines; i++)
-    {
-      if(i > MAX_NUMBER_OF_USERS - 1)
-        break;
+    char user_line[3][64];
+    split_string(sd_user_lines[i], user_line, 3, ',');
+    user_ids[i] = atoi(user_line[0]);
+    strncpy(passwords[i], user_line[1], USER_PSWD_SIZE);
+    passwords[i][USER_PSWD_SIZE - 1] = '\0';
+    strncpy(user_names[i], user_line[2], USER_NAME_SIZE);
+    user_names[i][USER_NAME_SIZE - 1] = '\0';
 
-      char user_line[3][64];
-      split_string(sd_user_lines[i], user_line, 3, ',');
-      user_ids[i] = atoi(user_line[0]);
-      strncpy(passwords[i], user_line[1], USER_PSWD_SIZE);
-      strncpy(user_names[i], user_line[2], USER_NAME_SIZE);
+    // Copia para update_user() y para volver a guardar la lista en la SD.
+    latest_users[i].id = user_ids[i];
+    strncpy(latest_users[i].password, passwords[i], USER_PSWD_SIZE);
+    strncpy(latest_users[i].name, user_names[i], USER_NAME_SIZE);
 
-      logger.log(user_ids[i]);
-      logger.log(": ");
-      logger.log(passwords[i]);
-      logger.log(", ");
-      logger.logln(user_names[i]);
-    }
+    logger.log(user_ids[i]);
+    logger.log(": ");
+    logger.log(passwords[i]);
+    logger.log(", ");
+    logger.logln(user_names[i]);
   }
+
+  // El número de usuarios es el de las líneas leídas, aunque /Parametros.txt diga otro.
+  number_of_users = read_lines;
+  latest_users_count = read_lines;
+}
+
+/**
+ * @brief Carga los tags guardados en /tags.txt (una línea "id,identificador" por tag).
+ *
+ * Si el archivo no existe no hay lista y no se puede despachar hasta que se
+ * descargue de la plataforma. Un archivo vacío sí es una lista: la del cliente
+ * sin tags, que rechaza todos.
+ */
+void config_tags()
+{
+  number_of_tags = 0;
+  tags_available = false;
+
+  File file = SD.open(TAGS_PATH, FILE_READ);
+
+  if(!file)
+  {
+    logger.logln("No hay lista de tags en la SD: no se podra despachar hasta descargarla.");
+    return;
+  }
+
+  tags_available = true;
+
+  while(file.available() && number_of_tags < MAX_NUMBER_OF_TAGS)
+  {
+    String line = file.readStringUntil('\n');
+    line.trim();
+
+    int comma = line.indexOf(',');
+
+    if(comma < 0)
+      continue;
+
+    String identifier = line.substring(comma + 1);
+    identifier.trim();
+
+    if(identifier.length() == 0)
+      continue;
+
+    tag_record *tag = &tags[number_of_tags++];
+    tag->id = line.substring(0, comma).toInt();
+    strncpy(tag->identifier, identifier.c_str(), sizeof(tag->identifier));
+    tag->identifier[sizeof(tag->identifier) - 1] = '\0';
+  }
+
+  file.close();
+
+  logger.log("Tags cargados de la SD: ");
+  logger.logln(number_of_tags);
 }
 
 /**
@@ -1599,10 +2025,25 @@ void read_write_ios()
 {
   open_cabinet = false;
   screen->set_cabinet_state(open_cabinet);
-  dispatching = screen->get_dispatching();
-  calibrating = screen->get_calibrating();
 
-  uint8_t current_relay_states[3]; 
+  bool was_open = dispatching || calibrating;
+  bool now_dispatching = screen->get_dispatching();
+  bool now_calibrating = screen->get_calibrating();
+
+  // Al cerrar las válvulas se empieza a contar el escurrimiento antes de bajar las
+  // banderas, para que la ISR no deje de contar ni un pulso. Si se reanuda, sigue el
+  // conteo normal.
+  if(now_dispatching || now_calibrating)
+    afterflow_active = false;
+  else if(was_open)
+    begin_afterflow();
+
+  dispatching = now_dispatching;
+  calibrating = now_calibrating;
+
+  update_afterflow();
+
+  uint8_t current_relay_states[3];
   if(xQueueReceive(Relay_Queue, (void *)&current_relay_states[0], 0) == pdTRUE)
     relay_control(current_relay_states);
 }
@@ -1620,6 +2061,402 @@ void relay_control(uint8_t p_relay_states[3])
   digitalWrite(RELAY_PIN_1, p_relay_states[0]);
   digitalWrite(RELAY_PIN_2, p_relay_states[1]);
   digitalWrite(RELAY_PIN_3, p_relay_states[2]);
+}
+
+void config_afterflow()
+{
+  if(!SD.exists(AFTERFLOW_PATH))
+    return;
+
+  char lines[2][128] = { "", "" };
+
+  if(read_file(AFTERFLOW_PATH, lines, 2, '\n') < 2)
+  {
+    logger.logln("No se pudieron leer los tiempos del escurrimiento; se usan los de fabrica.");
+    return;
+  }
+
+  char *end_min = nullptr;
+  char *end_quiet = nullptr;
+  unsigned long min_ms = strtoul(lines[0], &end_min, 10);
+  unsigned long quiet_ms = strtoul(lines[1], &end_quiet, 10);
+
+  if(end_min == lines[0] || end_quiet == lines[1]
+     || min_ms > AFTERFLOW_SETTING_MAX_MS || quiet_ms > AFTERFLOW_SETTING_MAX_MS)
+  {
+    logger.logln("Tiempos del escurrimiento invalidos en la SD; se usan los de fabrica.");
+    return;
+  }
+
+  afterflow_min_ms = min_ms;
+  afterflow_quiet_ms = quiet_ms;
+}
+
+void save_afterflow_times()
+{
+  char text[32];
+  snprintf(text, sizeof(text), "%lu\r\n%lu\r\n", afterflow_min_ms, afterflow_quiet_ms);
+  build_sd_info(AFTERFLOW_PATH, text, SAVE_FILE);
+}
+
+void begin_afterflow()
+{
+  // Con los dos tiempos en 0 el escurrimiento está desactivado: el conteo termina al
+  // cerrar las válvulas.
+  if(afterflow_active || (afterflow_min_ms == 0 && afterflow_quiet_ms == 0))
+    return;
+
+  unsigned long now = millis();
+  afterflow_start_ms = now;
+  afterflow_last_pulse_ms = now;
+  afterflow_start_count = flow_counter;
+  afterflow_last_count = afterflow_start_count;
+  // Al llamarse, "calibrating" todavía indica si lo que se cerró fue una calibración.
+  afterflow_calibration = calibrating;
+  afterflow_active = true;
+}
+
+void update_afterflow()
+{
+  if(!afterflow_active)
+    return;
+
+  unsigned long now = millis();
+  uint64_t count = flow_counter;
+
+  if(count != afterflow_last_count)
+  {
+    afterflow_last_count = count;
+    afterflow_last_pulse_ms = now;
+  }
+
+  // Termina cuando, pasado el mínimo, el medidor deja de dar pulsos.
+  if(now - afterflow_start_ms < afterflow_min_ms || now - afterflow_last_pulse_ms < afterflow_quiet_ms)
+    return;
+
+  afterflow_active = false;
+  afterflow_measured = true;
+  last_afterflow_pulses = (uint32_t)(afterflow_last_count - afterflow_start_count);
+  last_afterflow_ms = (uint32_t)(afterflow_last_pulse_ms - afterflow_start_ms);
+
+  char text[112];
+  snprintf(text, sizeof(text), "Escurrimiento: %u pulsos = %.0f ml en %u ms",
+           (unsigned)last_afterflow_pulses, last_afterflow_pulses * k_factor * offset * 1000.0f,
+           (unsigned)last_afterflow_ms);
+  calibration_report(text);
+
+  if(afterflow_calibration)
+  {
+    snprintf(text, sizeof(text), "Total del vertido: %u pulsos = %.2f L",
+             (unsigned)afterflow_last_count, afterflow_last_count * k_factor * offset);
+    calibration_report(text);
+    show_calibration_total();
+  }
+}
+
+void show_calibration_total()
+{
+  // Redondeado a centésimas, igual que la consola.
+  uint32_t int_measured_liters = (uint32_t)lroundf(flow_counter * k_factor * offset * 100.0f);
+  screen->write_to_address(DISPLAY_MEASURED_FLOW_ADDRESS, (uint8_t *)&int_measured_liters, sizeof(int_measured_liters), true);
+}
+
+void wait_afterflow()
+{
+  while(afterflow_active)
+  {
+    update_afterflow();
+
+    if(afterflow_active)
+      vTaskDelay(10 / portTICK_PERIOD_MS);
+  }
+}
+
+void save_factor(float p_value, uint8_t p_position)
+{
+  char str_value[16];
+  uint32_t value_int = (uint32_t)p_value;
+  uint32_t value_dec = (uint32_t)((p_value - value_int) * 1000000.0f);
+  snprintf(str_value, sizeof(str_value), "%u.%06u", (unsigned)value_int, (unsigned)value_dec);
+
+  build_sd_info(PARAMETERS_PATH, str_value, SAVE_GENERAL_PARAMETER, p_position);
+}
+
+void console_println(const char *p_text)
+{
+  if(calibration_console)
+    Serial.println(p_text);
+}
+
+void calibration_report(const char *p_text)
+{
+  console_println(p_text);
+
+  // En release queda en el log de la SD. En depuración el log es el puerto serie: dentro
+  // de la pantalla de calibración está silenciado (no sale doble) y fuera sale como una
+  // línea más.
+  logger.logln(p_text);
+}
+
+void update_calibration_console()
+{
+  bool active = screen->get_screen_state() == CALIBRATION_SCREEN_STATE;
+
+  if(active == calibration_console)
+    return;
+
+  if(!active)
+    console_println("=== Fin de la consola de calibracion ===");
+
+  calibration_console = active;
+
+  // En la pantalla de calibración solo se muestran los datos de calibración.
+  logger.set_serial_muted(active);
+
+  if(active)
+  {
+    console_println("");
+    console_println("=== Consola de calibracion (escribe \"ayuda\") ===");
+    print_calibration_status();
+  }
+}
+
+void serial_commands()
+{
+  static char line[65];
+  static size_t length = 0;
+
+  while(Serial.available() > 0)
+  {
+    char c = (char)Serial.read();
+
+    // Fuera de la pantalla de calibración se descarta lo que llegue, para que nada
+    // escrito antes se ejecute al entrar.
+    if(!calibration_console)
+    {
+      length = 0;
+      continue;
+    }
+
+    if(c == '\r' || c == '\n')
+    {
+      if(length > 0)
+      {
+        line[length] = '\0';
+        length = 0;
+        process_console_command(line);
+      }
+
+      continue;
+    }
+
+    if(length < sizeof(line) - 1)
+      line[length++] = c;
+  }
+}
+
+void process_console_command(char *p_line)
+{
+  char *command = strtok(p_line, " \t");
+  char *argument = strtok(nullptr, " \t");
+  char *argument2 = strtok(nullptr, " \t");
+
+  if(!command)
+    return;
+
+  for(char *c = command; *c; c++)
+    *c = (char)tolower((unsigned char)*c);
+
+  char text[128];
+
+  if(strcmp(command, "ayuda") == 0)
+  {
+    console_println("Comandos:");
+    console_println("  estado                  K, offset, tiempos, ultimo vertido y ultimo escurrimiento");
+    console_println("  k <valor>               cambia el factor K (litros por pulso)");
+    console_println("  offset <valor>          cambia el ajuste fino (1 = sin ajuste)");
+    console_println("  ajuste <litros>         calcula el offset con los litros de la jarra del ultimo vertido");
+    console_println("  escurrimiento           muestra los tiempos de espera despues de cerrar las valvulas");
+    console_println("  escurrimiento <min> <sin pulsos>");
+    console_println("                          cambia los tiempos, en segundos (p. ej. escurrimiento 2 1)");
+    console_println("  escurrimiento off       no cuenta el escurrimiento (igual que escurrimiento 0 0)");
+    return;
+  }
+
+  if(strcmp(command, "estado") == 0)
+  {
+    print_calibration_status();
+    return;
+  }
+
+  bool set_k = strcmp(command, "k") == 0;
+  bool set_offset = strcmp(command, "offset") == 0;
+  bool adjust = strcmp(command, "ajuste") == 0;
+  bool set_afterflow = strcmp(command, "escurrimiento") == 0;
+
+  if(!set_k && !set_offset && !adjust && !set_afterflow)
+  {
+    console_println("Comando desconocido. Escribe \"ayuda\".");
+    return;
+  }
+
+  if(set_afterflow && !argument)
+  {
+    format_afterflow_times(text, sizeof(text));
+    console_println(text);
+    return;
+  }
+
+  // Por si quitan el jumper estando en la pantalla de calibración.
+  if(!digitalRead(CALIBRATION_PIN))
+  {
+    console_println("Sin el jumper de calibracion no se pueden cambiar valores.");
+    return;
+  }
+
+  if(calibrating || afterflow_active)
+  {
+    console_println("Espera a que termine el vertido.");
+    return;
+  }
+
+  if(set_afterflow)
+  {
+    unsigned long times_ms[2] = { 0, 0 };
+
+    if(strcasecmp(argument, "off") != 0)
+    {
+      // Segundos con decimales, de 0 al máximo permitido.
+      const char *values[2] = { argument, argument2 };
+
+      for(int i = 0; i < 2; i++)
+      {
+        char *end = nullptr;
+        float seconds = values[i] ? strtof(values[i], &end) : -1.0f;
+
+        if(!values[i] || end == values[i] || *end != '\0' || !std::isfinite(seconds)
+           || seconds < 0.0f || seconds * 1000.0f > AFTERFLOW_SETTING_MAX_MS)
+        {
+          snprintf(text, sizeof(text), "Escribe dos tiempos en segundos, de 0 a %lu (p. ej. escurrimiento 2 1), u \"off\".",
+                   AFTERFLOW_SETTING_MAX_MS / 1000);
+          console_println(text);
+          return;
+        }
+
+        times_ms[i] = (unsigned long)lroundf(seconds * 1000.0f);
+      }
+    }
+
+    afterflow_min_ms = times_ms[0];
+    afterflow_quiet_ms = times_ms[1];
+    format_afterflow_times(text, sizeof(text));
+    calibration_report(text);
+    save_afterflow_times();
+    return;
+  }
+
+  char *end = nullptr;
+  float value = argument ? strtof(argument, &end) : 0.0f;
+
+  if(!argument || end == argument || *end != '\0' || !std::isfinite(value) || value <= 0.0f)
+  {
+    console_println("Valor invalido: escribe un numero mayor que 0, con punto decimal.");
+    return;
+  }
+
+  if(set_k)
+  {
+    snprintf(text, sizeof(text), "K: %.6f -> %.6f", k_factor, value);
+    k_factor = value;
+    calibration_report(text);
+    save_factor(k_factor, K_FACTOR_POS);
+    return;
+  }
+
+  if(set_offset)
+  {
+    snprintf(text, sizeof(text), "Offset: %.6f -> %.6f", offset, value);
+    offset = value;
+    calibration_report(text);
+    save_factor(offset, OFFSET_POS);
+    return;
+  }
+
+  // ajuste <litros de la jarra>: el offset que hace coincidir el último vertido con la jarra.
+  if(last_pour_pulses == 0)
+  {
+    console_println("No hay un vertido medido desde el arranque: haz un despacho o una calibracion.");
+    return;
+  }
+
+  float new_offset = value / ((float)last_pour_pulses * k_factor);
+  float change = (new_offset / offset - 1.0f) * 100.0f;
+
+  // Protección contra errores de captura (p. ej. 2.00 en vez de 20.00).
+  if(fabsf(change) > 20.0f)
+  {
+    snprintf(text, sizeof(text), "El ajuste cambiaria el offset %+.1f %%: revisa los litros, o usa \"offset\" o \"k\".", change);
+    console_println(text);
+    return;
+  }
+
+  snprintf(text, sizeof(text), "Ajuste: jarra %.2f L, medido %.2f L. Offset %.6f -> %.6f (%+.2f %%)",
+           value, last_pour_pulses * k_factor * offset, offset, new_offset, change);
+  offset = new_offset;
+  calibration_report(text);
+  save_factor(offset, OFFSET_POS);
+}
+
+void print_calibration_status()
+{
+  char text[128];
+
+  snprintf(text, sizeof(text), "K: %.6f   Offset: %.6f   (%.6f L por pulso)", k_factor, offset, k_factor * offset);
+  console_println(text);
+
+  console_println(digitalRead(CALIBRATION_PIN) ? "Jumper de calibracion: puesto"
+                                               : "Jumper de calibracion: quitado (no se pueden cambiar valores)");
+
+  format_afterflow_times(text, sizeof(text));
+  console_println(text);
+
+  if(parameters_note[0] != '\0')
+  {
+    snprintf(text, sizeof(text), "Al arrancar: %s", parameters_note);
+    console_println(text);
+  }
+
+  if(last_pour_pulses == 0)
+    snprintf(text, sizeof(text), "Ultimo vertido: ninguno desde el arranque");
+  else if(last_pour_ticket > 0)
+    snprintf(text, sizeof(text), "Ultimo vertido: despacho folio %05u, %u pulsos = %.2f L",
+             (unsigned)last_pour_ticket, (unsigned)last_pour_pulses, last_pour_pulses * k_factor * offset);
+  else
+    snprintf(text, sizeof(text), "Ultimo vertido: calibracion, %u pulsos = %.2f L",
+             (unsigned)last_pour_pulses, last_pour_pulses * k_factor * offset);
+
+  console_println(text);
+
+  if(afterflow_measured)
+    snprintf(text, sizeof(text), "Ultimo escurrimiento: %u pulsos = %.0f ml en %u ms",
+             (unsigned)last_afterflow_pulses, last_afterflow_pulses * k_factor * offset * 1000.0f, (unsigned)last_afterflow_ms);
+  else
+    snprintf(text, sizeof(text), "Ultimo escurrimiento: ninguno desde el arranque");
+
+  console_println(text);
+
+  // El valor que compensaba el escurrimiento antes de medirlo: ahora lo cobraría dos veces.
+  if(fabsf(offset - 1.017915f) < 0.0000005f && (afterflow_min_ms > 0 || afterflow_quiet_ms > 0))
+    console_println("AVISO: el offset 1.017915 compensaba el escurrimiento, que ahora se mide. Escribe \"offset 1\".");
+}
+
+void format_afterflow_times(char *p_text, size_t p_size)
+{
+  if(afterflow_min_ms == 0 && afterflow_quiet_ms == 0)
+    snprintf(p_text, p_size, "Escurrimiento: desactivado (se deja de contar al cerrar las valvulas)");
+  else
+    snprintf(p_text, p_size, "Escurrimiento: minimo %.1f s, termina tras %.1f s sin pulsos",
+             afterflow_min_ms / 1000.0f, afterflow_quiet_ms / 1000.0f);
 }
 
 /**
@@ -1654,86 +2491,177 @@ void check_printer()
  */
 void get_lls_data()
 {
-  unsigned long current_millis = millis();
   static unsigned long last_millis = 0;
-  static bool get_first = false;
+  static unsigned long interval = 0;      // 0: la primera lectura se hace de inmediato.
+  static bool sensor_connected = true;    // Evita repetir FUEL_SENSOR_DISCONNECTED en cada reintento.
 
-  if(current_millis - last_millis > 3600000 || !get_first)
+  unsigned long current_millis = millis();
+
+  if(current_millis - last_millis < interval)
+    return;
+
+  last_millis = current_millis;
+
+  status l_status = lls_device->read_lls_data(0x01);
+
+  if(l_status == LLS::NO_DEVICE_ERROR)
   {
-    status l_status = lls_device->read_lls_data(0x01);
-    json_event event;
-    
-    if(l_status == LLS::NO_DEVICE_ERROR)
+    lls_fuel_level = lls_device->get_fuel_level(0x01);
+    lls_temp = lls_device->get_temperature(0x01);
+
+    logger.log("Fuel: ");
+    logger.logln(lls_fuel_level);
+
+    logger.log("Temp: ");
+    logger.logln(lls_temp);
+
+    trigger_event(FUEL_LEVEL);
+
+    sensor_connected = true;
+    interval = LLS_READ_INTERVAL_MS;
+  }
+  else
+  {
+    // Cualquier error (timeout, CRC, encabezado, dirección o nivel fuera de rango)
+    // se trata como sensor no disponible y se reintenta en poco tiempo.
+    logger.log("Error LLS: ");
+    logger.logln(l_status);
+
+    lls_fuel_level = 0;
+    lls_temp = 0;
+
+    if(sensor_connected)
     {
-      lls_fuel_level = lls_device->get_fuel_level(0x01);
-      lls_temp = lls_device->get_temperature(0x01);
-
-      logger.log("Fuel: ");
-      logger.logln(lls_fuel_level);
-
-      logger.log("Temp: ");
-      logger.logln(lls_temp);
-      event = FUEL_LEVEL;
-    }
-    else if(l_status == LLS::TIMEOUT_ERROR)
-    {
-      lls_fuel_level = 0;
-      lls_temp = 0;
-
-      event = FUEL_SENSOR_DISCONNECTED;
+      trigger_event(FUEL_SENSOR_DISCONNECTED);
+      sensor_connected = false;
     }
 
-    trigger_event(event);
-
-    get_first = true;
-    last_millis = current_millis;
+    interval = LLS_RETRY_INTERVAL_MS;
   }
 }
 
 /**
- * 
- * 
+ * @brief Lee el lector RFID para el despacho.
+ *
+ * Desde que se presiona "iniciar" hasta que termina el despacho, se lee cada
+ * RFID_DISPATCH_READ_INTERVAL_MS:
+ * - Mientras no hay tag de despacho, el primer tag registrado en la plataforma pasa
+ *   a ser el tag del despacho y la pantalla empieza a despachar. Un tag que no está
+ *   registrado solo muestra el motivo, y se sigue leyendo.
+ * - Después, cada lectura debe ser de ese mismo tag. Tras RFID_MAX_MISSED_READS
+ *   lecturas seguidas sin él (no se lee nada, se lee otro tag o el lector no
+ *   responde), se reporta como no detectado y la pantalla pausa el despacho. Con la
+ *   primera lectura buena se reporta detectado otra vez y se puede reanudar.
+ *
+ * Fuera de eso solo se consulta el lector cada RFID_CHECK_INTERVAL_MS, para avisar
+ * si se desconectó.
  */
 void get_rfid_data()
 {
-  unsigned long current_millis = millis();
   static unsigned long last_millis = 0;
+  /// Sesión de lectura de la pantalla que se está atendiendo.
+  static uint8_t session = 0;
+  /// Ya se leyó el tag que inició el despacho de esta sesión.
+  static bool has_dispatch_tag = false;
+  /// Tag que inició el despacho.
+  static uint32_t dispatch_tag = 0;
+  /// Lecturas seguidas sin el tag del despacho.
+  static uint8_t missed_reads = 0;
+  /// Último tag rechazado, para no repetir el log en cada lectura mientras siga frente al lector.
+  static uint32_t last_rejected_tag = UINT32_MAX;
 
-  screen_state current_state = screen->get_screen_state();
-  uint8_t counter = screen->get_state() ? screen->get_state_counter() : 0;
+  bool reading = screen->get_screen_state() == DISPATCH_SCREEN_STATE && screen->get_tag_reading();
+  uint8_t current_session = screen->get_tag_session();
 
-  unsigned long rfid_request_time = (!screen->get_dispatching() && current_state == DISPATCH_SCREEN_STATE && counter < 2) ? 1000 : 600000;
-
-  if(current_state != DISPATCH_SCREEN_STATE || (current_state == DISPATCH_SCREEN_STATE && counter == 2))
-    rfid_read = false;
-
-  if(current_millis - last_millis > rfid_request_time && !screen->get_dispatching() && !rfid_read)
+  // Cada sesión de lectura empieza sin tag de despacho.
+  if(!reading || current_session != session)
   {
-    uint8_t *tag_data;
-    status rfid_status = rfid_device->get_tag_data(&tag_data, RFID_READER_ADDR);
-    
-    if(rfid_status == MT124::READ_TAG_SUCCESSFULLY && (current_state == DISPATCH_SCREEN_STATE && counter != 2))
+    session = current_session;
+    has_dispatch_tag = false;
+    missed_reads = 0;
+    last_rejected_tag = UINT32_MAX;
+  }
+
+  unsigned long current_millis = millis();
+  unsigned long interval = reading ? RFID_DISPATCH_READ_INTERVAL_MS : RFID_CHECK_INTERVAL_MS;
+
+  if(current_millis - last_millis < interval)
+    return;
+
+  last_millis = current_millis;
+
+  uint8_t *tag_data;
+  status rfid_status = rfid_device->get_tag_data(&tag_data, RFID_READER_ADDR);
+  bool tag_read = rfid_status == MT124::READ_TAG_SUCCESSFULLY;
+
+  if(tag_read)
+  {
+    rfid_disconnected_event_flag = false;  // Reiniciar bandera de desconexión al leer una etiqueta exitosamente
+  }
+  else if(rfid_status == MT124::TIMEOUT_ERROR && !rfid_disconnected_event_flag)
+  {
+    trigger_event(RFID_READER_DISCONNECTED);
+    rfid_disconnected_event_flag = true;
+  }
+
+  // La lectura tarda de 100 a 200 ms: si mientras tanto se terminó o se volvió a
+  // iniciar la sesión, el resultado ya no aplica.
+  if(!reading || screen->get_tag_session() != session)
+    return;
+
+  uint32_t int_tag = tag_read ? (uint32_t)((tag_data[0] << 16) | (tag_data[1] << 8) | tag_data[2]) : 0;
+
+  if(!has_dispatch_tag)
+  {
+    if(!tag_read)
+      return;
+
+    char read_tag[16];
+    snprintf(read_tag, sizeof(read_tag), "%010u", int_tag);
+
+    // Solo se despacha con un tag registrado en la plataforma.
+    char identifier[TAG_ID_SIZE];
+    tag_status_t tag_status = find_tag(read_tag, identifier, sizeof(identifier));
+
+    if(tag_status == TAG_REGISTERED)
     {
-      screen->set_tag_detected(true);
+      // En el evento viaja el identificador tal como está en la plataforma.
+      snprintf(str_tag, sizeof(str_tag), "\"%s\"", identifier);
+      dispatch_tag = int_tag;
+      has_dispatch_tag = true;
+      missed_reads = 0;
+      screen->set_tag_status(session, true, nullptr);
 
-      rfid_read = true;
-      rfid_disconnected_event_flag = false;  // Reiniciar bandera de desconexión al leer una etiqueta exitosamente
-
-      uint32_t int_tag = (tag_data[0] << 16) | (tag_data[1] << 8) | tag_data[2];
-      snprintf(str_tag, sizeof(str_tag), "\"%010u\"", int_tag);
-
-      str_tag[sizeof(str_tag) - 1] = '\0';
-
-      logger.log("Tag: ");
+      logger.log("Tag valido, inicia el despacho: ");
       logger.logln(str_tag);
     }
-    else if(rfid_status == MT124::TIMEOUT_ERROR && !rfid_disconnected_event_flag)
+    else
     {
-      trigger_event(RFID_READER_DISCONNECTED);
-      rfid_disconnected_event_flag = true;
+      screen->set_tag_status(session, false, tag_status == TAG_NO_LIST ? no_tag_list_message : unregistered_tag_message);
+
+      if(int_tag != last_rejected_tag)
+      {
+        logger.log(tag_status == TAG_NO_LIST ? "Sin lista de tags; se rechaza el tag " : "Tag no registrado: ");
+        logger.logln(read_tag);
+        last_rejected_tag = int_tag;
+      }
     }
 
-    last_millis = current_millis;
+    return;
+  }
+
+  if(tag_read && int_tag == dispatch_tag)
+  {
+    if(missed_reads >= RFID_MAX_MISSED_READS)
+      logger.logln("Se volvio a leer el tag del despacho");
+
+    missed_reads = 0;
+    screen->set_tag_status(session, true, nullptr);
+  }
+  else if(missed_reads < RFID_MAX_MISSED_READS && ++missed_reads == RFID_MAX_MISSED_READS)
+  {
+    screen->set_tag_status(session, false, nullptr);
+    logger.logln("No se lee el tag del despacho");
   }
 }
 
@@ -1768,6 +2696,19 @@ void save_to_sd()
         save_dispatch(sd_info.data, sd_info.delete_info);
       break;
 
+      case SAVE_USERS_LIST:
+        save_users_to_sd();
+      break;
+
+      case SAVE_TAGS_LIST:
+        save_tags_to_sd();
+      break;
+
+      case SAVE_FILE:
+        if(!write_to_file(sd_info.path, sd_info.data))
+          logger.logln("No se pudo guardar el archivo.");
+      break;
+
       case SAVE_GENERAL_PARAMETER:
       case SAVE_GITHUB_PARAMETER:
       case SAVE_API_KEY:
@@ -1792,7 +2733,7 @@ void save_to_sd()
 bool send_data(json_event_struct *p_json)
 {
   char json[MAX_EVENT_JSON_LENGTH]  = "";
-  int length = snprintf(json, sizeof(json), "[{\"fecha\":\"20%02u-%02u-%02uT%02u:%02u:%02u\",\"idEvento\":%u,\"folio\":%s,\"nivel\":%u,\"temperatura\":%d,\"energia\":%u.%u,\"abierto\":%u,\"clave\":%s,\"idUsuario\":%s,\"cantidad\":%s,\"tag\":%s}]", 
+  int length = snprintf(json, sizeof(json), "[{\"fecha\":\"20%02u-%02u-%02uT%02u:%02u:%02u\",\"idEvento\":%u,\"folio\":%s,\"nivel\":%u,\"temperatura\":%d,\"energia\":%u.%02u,\"abierto\":%u,\"clave\":%s,\"idUsuario\":%s,\"cantidad\":%s,\"tag\":%s}]", 
                         p_json->year, p_json->month, p_json->day, p_json->hour, p_json->minute, p_json->second, p_json->event, p_json->ticket_number, p_json->fuel_level, p_json->fuel_temp, p_json->int_battery_level, p_json->dec_battery_level, p_json->open, 
                         p_json->password, p_json->user_id, p_json->quantity_dispatched, p_json->tag);
   
@@ -1830,9 +2771,9 @@ bool send_data(const char *p_json)
   length[sizeof(length - 1)] = '\0';
 
   http_client->set_server(server);
-  http_client->set_port(port);  //443
+  http_client->set_port(port);
   http_client->set_endpoint(data_endpoint);
-  http_client->set_secure(true);
+  http_client->set_secure(use_tls());
   http_client->set_header("Host", server, 0);
   http_client->set_header("Content-Type", "application/json", 1);
   http_client->set_header("Content-Length", length, 2);
@@ -1893,7 +2834,7 @@ bool update_data(const char *p_json, const char *p_endpoint)
   http_client->set_header("Content-Type", "application/json", 1);
   http_client->set_header("Content-Length", length, 2);
   http_client->set_header("x-api-key", api_key, 3);
-  http_client->set_secure(true);
+  http_client->set_secure(use_tls());
   return http_client->update_data((uint8_t *)p_json, strlen(p_json) + 1) / 200 == 1 ? true : false;
 }
 
@@ -1916,8 +2857,12 @@ void trigger_event(json_event p_event, bool p_use_password, float p_quantity, bo
 
   json_struct.fuel_level = lls_fuel_level;
   json_struct.fuel_temp = lls_temp;
-  json_struct.int_battery_level = (uint8_t)(voltage);
-  json_struct.dec_battery_level = (uint8_t)((voltage - json_struct.int_battery_level) * 100);
+  // Se redondea a centésimas antes de separar entero y decimales. Restar la parte
+  // entera y multiplicar por 100 truncaba, y sin "%02u" en send_data se perdía el
+  // cero: 12.07 V se enviaba como "energia":12.6.
+  uint16_t centivolts = voltage > 0.0f ? (uint16_t)lroundf(voltage * 100.0f) : 0;
+  json_struct.int_battery_level = (uint8_t)(centivolts / 100);
+  json_struct.dec_battery_level = (uint8_t)(centivolts % 100);
   json_struct.year = rtc_data[RTC_YEAR_INDEX];
   json_struct.month = rtc_data[RTC_MONTH_INDEX];
   json_struct.day = rtc_data[RTC_DAY_INDEX];
@@ -1947,10 +2892,12 @@ void trigger_event(json_event p_event, bool p_use_password, float p_quantity, bo
   
   if(p_quantity != 0)
   {
-    uint32_t int_quantity = (uint32_t)(p_quantity);
-    uint32_t dec_quantity = (uint32_t)((p_quantity - int_quantity) * 100);
+    // Misma operación que usa el display ((uint32_t)(volumen * 100), ver
+    // dispatch_state en State.cpp), para que el servidor reciba los mismos litros
+    // que vio el usuario. Restar la parte entera primero a veces daba un centavo menos.
+    uint32_t cents_quantity = (uint32_t)(p_quantity * 100);
 
-    snprintf(json_struct.quantity_dispatched, sizeof(json_struct.quantity_dispatched), "%u.%02u", int_quantity, dec_quantity);
+    snprintf(json_struct.quantity_dispatched, sizeof(json_struct.quantity_dispatched), "%u.%02u", cents_quantity / 100, cents_quantity % 100);
   }
   else 
     strncpy(json_struct.quantity_dispatched, null_text, sizeof(json_struct.quantity_dispatched));
@@ -2126,95 +3073,584 @@ void events()
     printer_disconnected_event_flag = false;
 }
 
-void get_users()
+/**
+ * @brief Descarga de la plataforma los datos que el equipo necesita para operar.
+ *
+ * Primero consulta el registro del dispositivo (por si su cliente cambió), luego
+ * los usuarios y tags de ese cliente y al final el precio del producto. Cada lista
+ * reemplaza a la anterior solo si se descargó completa; si no, se conserva la de
+ * la SD. Todo se filtra únicamente por cliente.
+ *
+ * @return true si se descargaron las listas de usuarios y de tags.
+ */
+bool sync_platform_data()
+{
+  logger.logln("Descargando datos de la plataforma...");
+
+  sync_device();
+
+  bool users_synced = sync_users();
+  bool tags_synced = sync_tags();
+
+  sync_product();
+
+  return users_synced && tags_synced;
+}
+
+const char *platform_get(const char *p_endpoint)
 {
   if(!ethernet_begin)
-    return;
+    return nullptr;
 
-  logger.logln("Obteniendo usuarios...");
-  uint8_t data[2400];
-  memset(data, 0x00, sizeof(data));
+  logger.log("GET ");
+  logger.logln(p_endpoint);
 
-  char endpoint[48] = "";
-  snprintf(endpoint, sizeof(endpoint), "%s%u&listado=true", users_endpoint, client_id);
-
+  xSemaphoreTake(http_mutex, portMAX_DELAY);
   http_client->set_server(server);
-  http_client->set_endpoint(endpoint);
+  http_client->set_endpoint(p_endpoint);
   http_client->set_port(port);
-  http_client->set_secure(true);
+  http_client->set_secure(use_tls());
   http_client->set_header("Host", server, 0);
   http_client->set_header("Content-Type", "application/json", 1);
   http_client->set_header("x-api-key", api_key, 2);
-
-  const char *json = nullptr;
-
-  xSemaphoreTake(http_mutex, portMAX_DELAY);
-  if(http_client->get_data_from_server(data, sizeof(data)) > 0)
-    json = (const char *)&data[0];
+  int length = http_client->get_data_from_server(platform_buffer, sizeof(platform_buffer));
+  http_client->flush_headers();
   xSemaphoreGive(http_mutex);
 
-  http_client->flush_headers();
-
-  if(!json)
-    return;
-
-  int tokens = parser.parse_json(json);
-
-  int index = 0;
-  if((index = parser.json_find_key_in_object(json, 0, "data")) > 0)
+  if(length <= 0)
   {
-    jsmntok_t *data_token = parser.get_token(index);
-    
-    if(!data_token)
-      return;
-
-    logger.log("Numero de datos en \"data\": ");
-    logger.logln(data_token->size);
-
-    parse_users(json, data_token, data_token->size, index);
+    logger.log("Sin respuesta valida de la plataforma, codigo: ");
+    logger.logln(length);
+    return nullptr;
   }
-  else
-    logger.logln("No se encontró la clave");
+
+  return (const char *)platform_buffer;
 }
 
-void parse_users(const char *p_json, jsmntok_t *p_token, int p_token_size, int p_index)
+/**
+ * @brief Consulta el registro del dispositivo y actualiza el id de cliente.
+ *
+ * Se busca con ?identificador=<MAC>: GET /api/dispositivos/<MAC> no sirve porque
+ * la plataforma toma la MAC como id numérico y regresa otro dispositivo.
+ */
+bool sync_device()
 {
-  if(p_token_size > MAX_NUMBER_OF_USERS)
+  char endpoint[96];
+  snprintf(endpoint, sizeof(endpoint), "%s?identificador=%s&listado=true", device_endpoint, device_name);
+
+  const char *json = platform_get(endpoint);
+
+  if(!json)
+    return false;
+
+  const char *cursor = parser.find_root_array(json, "data");
+
+  if(!cursor)
   {
-    logger.logln("El número de usuarios es mayor que el del buffer permitido.");
-    logger.logln("Habrá perdidad de datos.");
-    p_token_size = MAX_NUMBER_OF_USERS;
+    logger.logln("Respuesta inesperada al consultar el dispositivo.");
+    return false;
   }
 
-  if(p_token->type != JSMN_ARRAY)
+  const char *object;
+  size_t length;
+
+  while(parser.next_array_object(&cursor, &object, &length))
+  {
+    if(parser.parse_json(object, length) < 1)
+      continue;
+
+    char identifier[32];
+
+    // Por si la plataforma ignora el filtro y regresa todos los dispositivos.
+    if(!parser.get_value_text(object, 0, "identificador", identifier, sizeof(identifier)) || strcasecmp(identifier, device_name) != 0)
+      continue;
+
+    char str_client_id[12];
+    int client_index = parser.json_find_key_in_object(object, 0, "cliente");
+
+    if(client_index < 0 || !parser.get_value_text(object, client_index, "id", str_client_id, sizeof(str_client_id)))
+    {
+      logger.logln("El dispositivo no tiene cliente asignado en la plataforma.");
+      return false;
+    }
+
+    uint32_t platform_client_id = strtoul(str_client_id, nullptr, 10);
+
+    if(platform_client_id != 0 && platform_client_id != client_id)
+    {
+      logger.log("Id de cliente actualizado desde la plataforma: ");
+      logger.logln(platform_client_id);
+
+      client_id = platform_client_id;
+      build_sd_info(PARAMETERS_PATH, str_client_id, SAVE_GENERAL_PARAMETER, CLIENT_ID_POS);
+    }
+
+    return true;
+  }
+
+  logger.log("El dispositivo ");
+  logger.log(device_name);
+  logger.logln(" no esta registrado en la plataforma.");
+  return false;
+}
+
+/**
+ * @brief Descarga los usuarios del cliente que pueden iniciar sesión en el equipo.
+ *
+ * Mismos criterios que el simulador y que el firmware anterior: del cliente del
+ * dispositivo, con perfil despachador, supervisor o administrador y con clave. La
+ * clave debe caber en USER_PSWD_SIZE (4 dígitos): una más larga se recortaría y
+ * entraría con solo sus primeros dígitos, así que ese usuario se excluye.
+ */
+bool sync_users()
+{
+  if(client_id == 0)
+  {
+    logger.logln("Sin id de cliente: no se descargan los usuarios.");
+    return false;
+  }
+
+  char endpoint[64];
+  snprintf(endpoint, sizeof(endpoint), "%s%u&listado=true", users_endpoint, client_id);
+
+  const char *json = platform_get(endpoint);
+
+  if(!json)
+    return false;
+
+  const char *cursor = parser.find_root_array(json, "data");
+
+  if(!cursor)
+  {
+    logger.logln("Respuesta inesperada al descargar los usuarios.");
+    return false;
+  }
+
+  static user_record downloaded[MAX_NUMBER_OF_USERS];
+  int count = 0;
+  const char *object;
+  size_t length;
+  user_json_struct user;
+
+  while(parser.next_array_object(&cursor, &object, &length))
+  {
+    if(parser.parse_json(object, length) < 1)
+      continue;
+
+    parser.parse_user(object, 0, &user);
+
+    const char *profile = strlwr(user.profile.name);
+    const char *reason = nullptr;
+
+    if(user.client.id != 0 && (uint32_t)user.client.id != client_id)
+      reason = "otro cliente";
+    else if(strcmp(profile, "despachador") && strcmp(profile, "supervisor") && strcmp(profile, "administrador"))
+      reason = "perfil sin acceso";
+    else if(user.password[0] == '\0')
+      reason = "sin clave";
+    else if(strlen(user.password) > USER_PSWD_SIZE - 1)
+      reason = "clave de mas de 4 digitos";
+    else if(count >= MAX_NUMBER_OF_USERS)
+      reason = "la lista esta llena";
+
+    if(reason)
+    {
+      logger.log("Usuario sin acceso: ");
+      logger.log(user.name);
+      logger.log(" ");
+      logger.log(user.last_name);
+      logger.log(" (");
+      logger.log(reason);
+      logger.logln(")");
+      continue;
+    }
+
+    user_record *record = &downloaded[count++];
+    record->id = user.id;
+    strncpy(record->password, user.password, sizeof(record->password));
+    record->password[sizeof(record->password) - 1] = '\0';
+    snprintf(record->name, sizeof(record->name), "%s %s", user.name, user.last_name);
+
+    // La coma separa los campos de /usuarios.txt.
+    for(char *c = record->name; *c; c++)
+      if(*c == ',')
+        *c = ' ';
+  }
+
+  // Una lista vacía casi siempre es un error de configuración en la plataforma;
+  // aplicarla dejaría el equipo sin nadie que pueda iniciar sesión.
+  if(count == 0)
+  {
+    logger.logln("La plataforma no regreso usuarios con acceso; se conserva la lista actual.");
+    return true;
+  }
+
+  xSemaphoreTake(lists_mutex, portMAX_DELAY);
+  memcpy(latest_users, downloaded, sizeof(user_record) * count);
+  latest_users_count = count;
+  users_update_pending = true;
+  xSemaphoreGive(lists_mutex);
+
+  build_sd_info(USERS_PATH, "", SAVE_USERS_LIST);
+
+  logger.log("Usuarios con acceso: ");
+  logger.logln(count);
+  return true;
+}
+
+/**
+ * @brief Descarga los tags activos del cliente y reemplaza la lista local.
+ *
+ * Una lista vacía sí se aplica: el cliente no tiene tags y se rechaza cualquiera.
+ * Los tags con estatus false (dados de baja) no se guardan.
+ */
+bool sync_tags()
+{
+  if(client_id == 0)
+  {
+    logger.logln("Sin id de cliente: no se descargan los tags.");
+    return false;
+  }
+
+  char endpoint[64];
+  snprintf(endpoint, sizeof(endpoint), "%s?cliente=%u&listado=true", tags_endpoint, client_id);
+
+  const char *json = platform_get(endpoint);
+
+  if(!json)
+    return false;
+
+  const char *cursor = parser.find_root_array(json, "data");
+
+  if(!cursor)
+  {
+    logger.logln("Respuesta inesperada al descargar los tags.");
+    return false;
+  }
+
+  static tag_record downloaded[MAX_NUMBER_OF_TAGS];
+  int count = 0;
+  const char *object;
+  size_t length;
+
+  while(parser.next_array_object(&cursor, &object, &length))
+  {
+    if(parser.parse_json(object, length) < 1)
+      continue;
+
+    tag_record record = {};
+    char text[16];
+    bool is_null = false;
+
+    if(!parser.get_value_text(object, 0, "identificador", record.identifier, sizeof(record.identifier)) || record.identifier[0] == '\0')
+      continue;
+
+    // El identificador viaja entre comillas en los eventos.
+    if(strpbrk(record.identifier, "\"\\"))
+    {
+      logger.log("Tag ignorado por tener comillas o diagonales: ");
+      logger.logln(record.identifier);
+      continue;
+    }
+
+    int client_index = parser.json_find_key_in_object(object, 0, "cliente");
+
+    if(client_index > 0 && parser.get_value_text(object, client_index, "id", text, sizeof(text)) && strtoul(text, nullptr, 10) != client_id)
+      continue;
+
+    if(parser.get_value_text(object, 0, "estatus", text, sizeof(text), &is_null) && !is_null && (strcmp(text, "false") == 0 || strcmp(text, "0") == 0))
+      continue;
+
+    if(count >= MAX_NUMBER_OF_TAGS)
+    {
+      logger.logln("Hay mas tags que MAX_NUMBER_OF_TAGS; se ignoran los demas.");
+      break;
+    }
+
+    if(parser.get_value_text(object, 0, "id", text, sizeof(text)))
+      record.id = atoi(text);
+
+    downloaded[count++] = record;
+
+    logger.log("Tag registrado: ");
+    logger.logln(record.identifier);
+  }
+
+  xSemaphoreTake(lists_mutex, portMAX_DELAY);
+  memcpy(tags, downloaded, sizeof(tag_record) * count);
+  number_of_tags = count;
+  tags_available = true;
+  xSemaphoreGive(lists_mutex);
+
+  build_sd_info(TAGS_PATH, "", SAVE_TAGS_LIST);
+
+  logger.log("Tags activos: ");
+  logger.logln(count);
+  return true;
+}
+
+/**
+ * @brief Descarga el producto del cliente y actualiza su nombre, id y precio.
+ *
+ * Se elige por id de producto (/Parametros.txt); si no hay id, por nombre, y si
+ * el cliente tiene un solo producto, ese. El precio llega como texto ("23.78").
+ */
+bool sync_product()
+{
+  if(client_id == 0)
+    return false;
+
+  char endpoint[64];
+  snprintf(endpoint, sizeof(endpoint), "%s?cliente=%u&listado=true", product_endpoint, client_id);
+
+  const char *json = platform_get(endpoint);
+
+  if(!json)
+    return false;
+
+  const char *cursor = parser.find_root_array(json, "data");
+
+  if(!cursor)
+  {
+    logger.logln("Respuesta inesperada al descargar los productos.");
+    return false;
+  }
+
+  const char *object;
+  size_t length;
+  int client_products = 0;
+  bool found = false;
+  int found_id = 0;
+  float found_price = 0.0f;
+  char found_name[PRODUCT_SIZE] = "";
+
+  while(!found && parser.next_array_object(&cursor, &object, &length))
+  {
+    if(parser.parse_json(object, length) < 1)
+      continue;
+
+    char text[16];
+    int client_index = parser.json_find_key_in_object(object, 0, "cliente");
+
+    if(client_index > 0 && parser.get_value_text(object, client_index, "id", text, sizeof(text)) && strtoul(text, nullptr, 10) != client_id)
+      continue;
+
+    char name[PRODUCT_SIZE];
+    int id = parser.get_value_text(object, 0, "id", text, sizeof(text)) ? atoi(text) : 0;
+    parser.get_value_text(object, 0, "nombre", name, sizeof(name));
+    float product_price = parser.get_value_text(object, 0, "precio", text, sizeof(text)) ? atof(text) : 0.0f;
+
+    client_products++;
+
+    bool is_first = client_products == 1;
+    bool matches = product_id != 0 ? (uint32_t)id == product_id : strcasecmp(name, product) == 0;
+
+    // El primero se guarda por si resulta ser el único producto del cliente.
+    if(matches || (is_first && product_id == 0))
+    {
+      found_id = id;
+      found_price = product_price;
+      strncpy(found_name, name, sizeof(found_name));
+      found_name[sizeof(found_name) - 1] = '\0';
+      found = matches;
+    }
+  }
+
+  if(!found && !(product_id == 0 && client_products == 1))
+  {
+    logger.logln("No se encontro el producto del dispositivo en la plataforma.");
+    return false;
+  }
+
+  if(found_price <= 0.0f)
+  {
+    logger.logln("El producto no tiene un precio valido en la plataforma.");
+    return false;
+  }
+
+  if(fabsf(found_price - price) > 0.001f)
+  {
+    char str_price[16];
+    snprintf(str_price, sizeof(str_price), "%.2f", found_price);
+
+    price = found_price;
+
+    if(screen)
+      screen->set_price(price);
+
+    build_sd_info(PARAMETERS_PATH, str_price, SAVE_GENERAL_PARAMETER, PRICE_POS);
+
+    logger.log("Precio actualizado desde la plataforma: ");
+    logger.logln(price);
+  }
+
+  if(found_name[0] != '\0' && strcmp(found_name, product) != 0)
+  {
+    strncpy(product, found_name, sizeof(product));
+    product[sizeof(product) - 1] = '\0';
+    build_sd_info(PARAMETERS_PATH, product, SAVE_GENERAL_PARAMETER, PRODUCT_POS);
+  }
+
+  if(found_id != 0 && (uint32_t)found_id != product_id)
+  {
+    char str_product_id[12];
+    snprintf(str_product_id, sizeof(str_product_id), "%d", found_id);
+
+    product_id = found_id;
+    build_sd_info(PARAMETERS_PATH, str_product_id, SAVE_GENERAL_PARAMETER, PRODUCT_ID_POS);
+  }
+
+  return true;
+}
+
+void apply_pending_users()
+{
+  xSemaphoreTake(lists_mutex, portMAX_DELAY);
+
+  if(users_update_pending)
+  {
+    for(int i = 0; i < MAX_NUMBER_OF_USERS; i++)
+    {
+      bool in_list = i < latest_users_count;
+
+      user_ids[i] = in_list ? latest_users[i].id : 0;
+      strncpy(passwords[i], in_list ? latest_users[i].password : "", USER_PSWD_SIZE);
+      passwords[i][USER_PSWD_SIZE - 1] = '\0';
+      strncpy(user_names[i], in_list ? latest_users[i].name : "", USER_NAME_SIZE);
+      user_names[i][USER_NAME_SIZE - 1] = '\0';
+    }
+
+    number_of_users = latest_users_count;
+    users_update_pending = false;
+
+    logger.log("Lista de usuarios aplicada: ");
+    logger.logln(number_of_users);
+  }
+
+  xSemaphoreGive(lists_mutex);
+}
+
+void save_users_to_sd()
+{
+  File file = SD.open(USERS_PATH, FILE_WRITE);
+
+  if(!file)
+  {
+    logger.logln("No se pudo guardar la lista de usuarios.");
     return;
-  
-  int current_index = p_index;
-
-  logger.logln("Usuarios disponibles: ");
-  for(int i = 0; i < p_token_size; i++)
-  {
-    current_index = parser.json_find_object(p_json, p_index, i);
-    jsmntok_t *token = parser.get_token(current_index);
-
-    if(!token)
-      continue;
-    
-    parser.parse_user(p_json, current_index, &users[i]);
-
-    if(users[i].client.id != client_id)
-      continue;
-
-    char *profile_name_lwr = strlwr(users[i].profile.name);
-    bool is_profile = !(strcmp(profile_name_lwr, "despachador") && strcmp(profile_name_lwr, "supervisor") && strcmp(profile_name_lwr, "administrador"));
-
-    if(!is_profile)
-      continue;
-
-    logger.log(users[i].name);
-    logger.log(" ");
-    logger.logln(users[i].last_name);
   }
+
+  xSemaphoreTake(lists_mutex, portMAX_DELAY);
+  int count = latest_users_count;
+
+  for(int i = 0; i < count; i++)
+  {
+    file.print(latest_users[i].id);
+    file.print(',');
+    file.print(latest_users[i].password);
+    file.print(',');
+    file.print(latest_users[i].name);
+    file.print("\r\n");
+  }
+
+  xSemaphoreGive(lists_mutex);
+  file.close();
+
+  // config_users() compara este número con las líneas del archivo al arrancar.
+  char str_count[6];
+  snprintf(str_count, sizeof(str_count), "%d", count);
+  const char *param = str_count;
+  uint8_t pos = NUMBER_OF_USERS_POS;
+  save_parameter(PARAMETERS_PATH, &param, &pos, 1);
+
+  logger.log("Usuarios guardados en la SD: ");
+  logger.logln(count);
+}
+
+void save_tags_to_sd()
+{
+  File file = SD.open(TAGS_PATH, FILE_WRITE);
+
+  if(!file)
+  {
+    logger.logln("No se pudo guardar la lista de tags.");
+    return;
+  }
+
+  xSemaphoreTake(lists_mutex, portMAX_DELAY);
+  int count = number_of_tags;
+
+  for(int i = 0; i < count; i++)
+  {
+    file.print(tags[i].id);
+    file.print(',');
+    file.print(tags[i].identifier);
+    file.print("\r\n");
+  }
+
+  xSemaphoreGive(lists_mutex);
+  file.close();
+
+  logger.log("Tags guardados en la SD: ");
+  logger.logln(count);
+}
+
+tag_status_t find_tag(const char *p_tag, char *p_identifier, size_t p_identifier_size)
+{
+  tag_status_t result = TAG_NOT_REGISTERED;
+
+  xSemaphoreTake(lists_mutex, portMAX_DELAY);
+
+  if(!tags_available)
+    result = TAG_NO_LIST;
+  else
+  {
+    for(int i = 0; i < number_of_tags; i++)
+    {
+      if(same_tag(p_tag, tags[i].identifier))
+      {
+        strncpy(p_identifier, tags[i].identifier, p_identifier_size);
+        p_identifier[p_identifier_size - 1] = '\0';
+        result = TAG_REGISTERED;
+        break;
+      }
+    }
+  }
+
+  xSemaphoreGive(lists_mutex);
+
+  return result;
+}
+
+/**
+ * Los identificadores numéricos se comparan por valor ("12345" y "0000012345"
+ * son el mismo tag), como en el simulador; los demás, como texto sin distinguir
+ * mayúsculas.
+ */
+bool same_tag(const char *p_tag_a, const char *p_tag_b)
+{
+  char *end_a = nullptr;
+  char *end_b = nullptr;
+  bool numeric_a = isdigit((unsigned char)p_tag_a[0]);
+  bool numeric_b = isdigit((unsigned char)p_tag_b[0]);
+  unsigned long long value_a = numeric_a ? strtoull(p_tag_a, &end_a, 10) : 0;
+  unsigned long long value_b = numeric_b ? strtoull(p_tag_b, &end_b, 10) : 0;
+
+  if(numeric_a && numeric_b && *end_a == '\0' && *end_b == '\0')
+    return value_a == value_b;
+
+  return strcasecmp(p_tag_a, p_tag_b) == 0;
+}
+
+const char *user_name_by_id(int p_user_id)
+{
+  for(int i = 0; i < number_of_users; i++)
+  {
+    if(user_ids[i] == p_user_id)
+      return user_names[i];
+  }
+
+  return "";
 }
 
 /**
@@ -2273,7 +3709,8 @@ void check_dispatches(bool init)
     logger.logln("Borrando los despachos del día");
     char last_dispatch[128];
 
-    if(get_last_dispatch(last_dispatch))
+    // get_last_dispatch() regresa 1 solo si lo leyó; con -1/-2 se guardaba basura.
+    if(get_last_dispatch(last_dispatch) == 1)
     {
       logger.logln(last_dispatch);
       save_dispatch(last_dispatch, true);
@@ -2283,7 +3720,9 @@ void check_dispatches(bool init)
 
     copy_backup(PARAMETERS_BACKUP_PATH, PARAMETERS_PATH);
     copy_backup(GITHUB_PARAMETERS_BACKUP_PATH, GITHUB_PARAMETERS_PATH);
-    copy_backup(USERS_PATH, USERS_BACKUP_PATH);
+    // copy_backup(destino, origen): respalda /usuarios.txt. Estaba invertido y cada
+    // día restauraba el respaldo encima de la lista descargada.
+    copy_backup(USERS_BACKUP_PATH, USERS_PATH);
 
     last_rtc_day = rtc_data[RTC_DAY_INDEX];
   }
@@ -2300,52 +3739,83 @@ void check_dispatches(bool init)
     return;
   }
 
+  // dispatches[] tiene MAX_NUMBER_OF_DISPATCHES renglones: leer más lo desborda y
+  // reescribir el archivo con solo los que caben perdería el resto. Se deja como
+  // está; el cambio de día lo reduce al último despacho.
+  if(lines > MAX_NUMBER_OF_DISPATCHES)
+  {
+    logger.logln("Hay mas despachos guardados de los que caben en memoria; no se depuran.");
+    return;
+  }
+
   logger.logln("Borrando los despachos que no son del día...");
 
-  get_dispatches(dispatches, lines);
-  char date[16] = "";
+  if(!get_dispatches(dispatches, lines))
+    return;
 
-  snprintf(date, sizeof(date),"%u;%u;%u", rtc_data[RTC_YEAR_INDEX], rtc_data[RTC_MONTH_INDEX], rtc_data[RTC_DAY_INDEX]);
-  date[sizeof(date) - 1] = '\0';
+  // El registro empieza con "año;mes;día;" (build_dispatch_string): se compara ese
+  // prefijo completo y no el texto en cualquier parte del renglón.
+  char date[16] = "";
+  snprintf(date, sizeof(date), "%u;%u;%u;", rtc_data[RTC_YEAR_INDEX], rtc_data[RTC_MONTH_INDEX], rtc_data[RTC_DAY_INDEX]);
+  size_t date_length = strlen(date);
 
   int counter = 0;
 
   for(int i = 0; i < lines; i++)
   {
-    if(!string_contains(dispatches[i], date))
+    if(strncmp(dispatches[i], date, date_length) != 0)
     {
       logger.logln(dispatches[i]);
       counter++;
     }
   }
 
-  logger.log("Numero de despachos: ");
+  logger.log("Despachos de otros dias: ");
   logger.logln(counter);
+
+  if(counter == 0)
+    return;
 
   if(counter >= lines)
   {
     char last_dispatch[128];
-    get_last_dispatch(last_dispatch);
-    save_dispatch(last_dispatch, true);
+
+    if(get_last_dispatch(last_dispatch) == 1)
+      save_dispatch(last_dispatch, true);
+
     return;
   }
-  
-  int index = lines - counter;
+
+  // Se conservan, en su orden, solo los del día. No basta con quedarse con los
+  // últimos renglones: el archivo suele empezar con el último despacho del día
+  // anterior (lo deja el cambio de día) y los de otro día no siempre van juntos.
   bool delete_dispatches = true;
 
-  for(int i = index; i < lines; i++)
+  for(int i = 0; i < lines; i++)
   {
-    save_dispatch(dispatches[i], delete_dispatches);
-    delete_dispatches = false;
+    if(strncmp(dispatches[i], date, date_length) == 0)
+    {
+      save_dispatch(dispatches[i], delete_dispatches);
+      delete_dispatches = false;
+    }
   }
 }
 
 void copy_backup(const char *p_main_path, const char *p_backup_path)
 {
+  // Abrir el destino con FILE_WRITE lo vacía, así que primero se confirma que el
+  // origen existe: sin respaldo, restaurar /Parametros.txt lo dejaba vacío.
   File backup = SD.open(p_backup_path, FILE_READ);
+
+  if(!backup)
+  {
+    logger.logln("No se pudo abrir el archivo.");
+    return;
+  }
+
   File main = SD.open(p_main_path, FILE_WRITE);
 
-  if(!main || !backup)
+  if(!main)
   {
     logger.logln("No se pudo abrir el archivo.");
     return;
@@ -2388,7 +3858,9 @@ void build_ticket(ticket_struct *p_ticket, const char *p_dispatch_str, uint8_t *
     float_data[i] = atof(dispatch_data[i + 7]);
 
   uint32_t ticket_num = atoi(dispatch_data[12]);
-  uint8_t usr_index = atoi(dispatch_data[13]);
+  // El despacho guarda el id del usuario (build_dispatch_string), no su índice:
+  // usarlo como índice tomaba otro usuario o leía fuera del arreglo.
+  int user_id = atoi(dispatch_data[13]);
 
   p_ticket->business_name = strlen(business_name) > 2 ? business_name : nullptr;
   p_ticket->business_address = strlen(business_address) > 2 ? business_address : nullptr;
@@ -2397,7 +3869,7 @@ void build_ticket(ticket_struct *p_ticket, const char *p_dispatch_str, uint8_t *
   p_ticket->business_state = strlen(business_state) > 2 ? business_state : nullptr;
   p_ticket->business_postal_code = strlen(business_postal_code) > 2 ? business_postal_code : nullptr;
   p_ticket->business_RFC = strlen(business_RFC) > 2 ? business_RFC : nullptr;
-  p_ticket->user_name = user_names[usr_index];
+  p_ticket->user_name = user_name_by_id(user_id);
   p_ticket->product = &product[0];
   p_ticket->rtc_array = p_rtc;
   p_ticket->liters = float_data[0];
@@ -2544,6 +4016,7 @@ void config_tasks()
   http_mutex = xSemaphoreCreateMutex();
   screen_mutex = xSemaphoreCreateMutex();
   i2c_mutex = xSemaphoreCreateMutex();
+  lists_mutex = xSemaphoreCreateMutex();
 
   Relay_Queue = xQueueCreate(5, 3);
   Event_Queue = xQueueCreate(10, sizeof(json_event_struct));
@@ -2591,35 +4064,57 @@ void update_user(const char *p_payload)
   get_json_key_value(keys, values, "apellido", last_name, 4);
   int user_id = atoi(str_user_id);
   logger.logln(str_user_id);
-  uint8_t index = 0;
-  bool index_found = false;
-  for(int i = 0; i < number_of_users; i++)
+
+  if(user_id == 0 || password[0] == '\0' || strlen(password) > USER_PSWD_SIZE - 1)
   {
-    if(user_ids[i] == user_id)
+    logger.logln("Actualizacion de usuario ignorada: falta el id o la clave no es de 1 a 4 digitos.");
+    return;
+  }
+
+  // Se actualiza la última lista (no la de la sesión en curso): se aplica en el
+  // siguiente inicio de sesión y se reescribe completa en la SD. Antes el usuario
+  // nuevo no se agregaba al archivo, porque save_parameter() solo reemplaza
+  // líneas existentes, y el cambio no se usaba hasta reiniciar.
+  xSemaphoreTake(lists_mutex, portMAX_DELAY);
+
+  int index = -1;
+
+  for(int i = 0; i < latest_users_count; i++)
+  {
+    if(latest_users[i].id == user_id)
     {
       index = i;
-      index_found = true;
       break;
     }
   }
 
-  if(!index_found)
+  if(index < 0 && latest_users_count < MAX_NUMBER_OF_USERS)
+    index = latest_users_count++;
+
+  if(index >= 0)
   {
-    number_of_users++;
-    index = number_of_users - 1;
-    char n_user_str[4];
-    snprintf(n_user_str, sizeof(n_user_str), "%d", number_of_users);
-    n_user_str[sizeof(n_user_str) - 1] = '\0';
-    
-    build_sd_info(PARAMETERS_PATH, n_user_str, SAVE_GENERAL_PARAMETER, NUMBER_OF_USERS_POS);
+    user_record *record = &latest_users[index];
+    record->id = user_id;
+    strncpy(record->password, password, sizeof(record->password));
+    record->password[sizeof(record->password) - 1] = '\0';
+    snprintf(record->name, sizeof(record->name), "%s %s", first_name, last_name);
+
+    for(char *c = record->name; *c; c++)
+      if(*c == ',')
+        *c = ' ';
+
+    users_update_pending = true;
   }
-  
-  char user_info[64];
-  snprintf(user_info, sizeof(user_info), "%d,%s,%s %s", user_id, password, first_name, last_name);
-  user_info[sizeof(user_info) - 1] = '\0';
 
-  build_sd_info(USERS_PATH, user_info, SAVE_USER, index);
+  xSemaphoreGive(lists_mutex);
 
+  if(index < 0)
+  {
+    logger.logln("No cabe el usuario nuevo: la lista de usuarios esta llena.");
+    return;
+  }
+
+  build_sd_info(USERS_PATH, "", SAVE_USERS_LIST);
 }
 
 /**

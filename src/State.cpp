@@ -495,74 +495,122 @@ void dispatch_state::draw()
     const char *product = this->m_device->get_product();
     this->m_device->write_to_address(DISPLAY_PRODUCT_ADDRESS, (uint8_t *)product, strlen(product));
 
-    if(!this->m_device->get_tag_detected())
-    {  
-        this->m_device->set_dispatching(false);
-        this->m_counter = 0;
-        this->m_device->write_to_address(DISPLAY_TAG_MESSAGE_ADDRESS, (uint8_t *)this->m_no_tag_message, strlen(this->m_no_tag_message));
-    }
+    // El tag se empieza a leer hasta que se presiona "iniciar".
+    this->m_device->set_dispatching(false);
+    this->m_counter = 0;
+    write_message(this->m_clear_tag_message);
+}
+
+void dispatch_state::write_message(const char *p_message)
+{
+    this->m_device->write_to_address(DISPLAY_TAG_MESSAGE_ADDRESS, (uint8_t *)p_message, strlen(p_message));
+}
+
+void dispatch_state::run_dispatch()
+{
+    this->m_counter = 1;
+    this->m_device->set_dispatching(true);
+    this->m_state_callback_function((uint8_t *)&m_dispatched_volume, 0);
+    write_message(this->m_clear_tag_message);
+}
+
+void dispatch_state::pause_dispatch()
+{
+    this->m_counter = 2;
+    this->m_device->set_dispatching(false);
+    this->m_state_callback_function((uint8_t *)&m_dispatched_volume, 2);
+}
+
+void dispatch_state::finish_dispatch()
+{
+    this->m_counter = 3;
+    this->m_state_callback_function((uint8_t *)&m_dispatched_volume, 3);
+    this->m_device->stop_tag_reading();
+    write_message(this->m_clear_tag_message);
 }
 
 void dispatch_state::screen(char p_key)
 {
-    // Manejo de teclas según el sub-estado actual
-    if(p_key)
+    // El tag lo lee General_Task desde que se presiona "iniciar" hasta que termina el
+    // despacho (get_rfid_data en main.cpp). Aquí se reacciona a lo que reporta: el
+    // primer tag registrado arranca el despacho, y si el tag que lo inició deja de
+    // leerse, se pausa y no se puede reanudar hasta volver a leerlo.
+    bool tag_changed = this->m_device->tag_message_changed();
+    bool tag_detected = this->m_device->get_tag_detected();
+
+    switch(this->m_counter)
     {
-        switch(this->m_counter)
+        case 0: // 0x12 - PRESS_TO_START: iniciar o salir
         {
-            case 0: // 0x12 - PRESS_TO_START
+            if(p_key == BACK)
             {
-                if(p_key == ENTER) // && this->m_device->get_tag_detected() 
-                {
-                    dispatch_initialized = true;
-                    this->m_counter = 1;
-                    this->m_device->set_dispatching(true);
-                    this->m_state_callback_function((uint8_t *)&m_dispatched_volume, 0);
-                    const char *text = "                 ";
-                    this->m_device->write_to_address(DISPLAY_TAG_MESSAGE_ADDRESS, (uint8_t *)text, strlen(text));
-                }
-                else if(p_key == BACK)
-                {
-                    this->m_device->set_transition(true, DISPATCH_MENU_SCREEN_STATE);
-                }
-                break;
+                this->m_device->set_transition(true, DISPATCH_MENU_SCREEN_STATE);
             }
-
-            case 1: // 0x13 - DISPATCHING_STARTED
+            else if(!this->m_device->get_tag_reading())
             {
-                if(p_key == BACK)
-                {
-                    this->m_counter = 2;
-                    this->m_device->set_dispatching(false);
-                    this->m_state_callback_function((uint8_t *)&m_dispatched_volume, 2);
-                }
-                break;
-            }
-
-            case 2: // 0x14 - DISPATCHING_IDLE (pausado)
-            {
+                // "Iniciar" solo pide el tag; el despacho arranca en cuanto se lee.
                 if(p_key == ENTER)
                 {
-                    this->m_counter = 1;
-                    this->m_device->set_dispatching(true);
-                    this->m_state_callback_function((uint8_t *)&m_dispatched_volume, 0);
+                    this->m_device->start_tag_reading();
+                    write_message(this->m_reading_tag_message);
                 }
-                else if(p_key == BACK)
-                {
-                    this->m_counter = 3;
-                    this->m_state_callback_function((uint8_t *)&m_dispatched_volume, 3);
-                }
-                break;
             }
-
-            case 3: // 0x15 - DISPATCHING_FINISH
+            else if(tag_detected)
             {
-                if(p_key == BACK)
-                {
-                    this->m_device->set_transition(true, DISPATCH_MENU_SCREEN_STATE);
-                }
-                break;
+                dispatch_initialized = true;
+                run_dispatch();
             }
+            else if(tag_changed)
+            {
+                // Se leyó un tag que no está registrado: se muestra el motivo y se
+                // sigue leyendo hasta que se presente uno válido o se salga.
+                const char *message = this->m_device->get_tag_message();
+                write_message(message ? message : this->m_reading_tag_message);
+            }
+            break;
+        }
+
+        case 1: // 0x13 - DISPATCHING_STARTED: detener
+        {
+            if(p_key == BACK)
+            {
+                pause_dispatch();
+            }
+            else if(!tag_detected)
+            {
+                // RFID_MAX_MISSED_READS lecturas seguidas sin el tag del despacho:
+                // se pausa igual que con "detener".
+                pause_dispatch();
+                write_message(this->m_no_tag_message);
+            }
+            break;
+        }
+
+        case 2: // 0x14 - DISPATCHING_IDLE (pausado): reanudar o terminar
+        {
+            if(tag_changed)
+                write_message(tag_detected ? this->m_tag_found_message : this->m_no_tag_message);
+
+            if(p_key == ENTER)
+            {
+                // Solo se reanuda mientras se lee el tag que inició el despacho.
+                if(tag_detected)
+                    run_dispatch();
+                else
+                    write_message(this->m_no_tag_message);
+            }
+            else if(p_key == BACK)
+            {
+                finish_dispatch();
+            }
+            break;
+        }
+
+        case 3: // 0x15 - DISPATCHING_FINISH: salir
+        {
+            if(p_key == BACK)
+                this->m_device->set_transition(true, DISPATCH_MENU_SCREEN_STATE);
+            break;
         }
     }
 
@@ -571,9 +619,7 @@ void dispatch_state::screen(char p_key)
     {
         if(OPENED_CABINET)
         {
-            this->m_counter = 2;
-            this->m_device->set_dispatching(false);
-            this->m_state_callback_function((uint8_t *)&m_dispatched_volume, 2);
+            pause_dispatch();
             const char *text1 = "                 ";
             this->m_device->write_to_address(DISPLAY_TAG_MESSAGE_ADDRESS, (uint8_t *)text1, strlen(text1));
             const char *text2 = "GABINETE ABIERTO";
@@ -592,13 +638,6 @@ void dispatch_state::screen(char p_key)
         this->m_device->write_to_address(DISPLAY_DISPATCHED_COST_ADDRESS, (uint8_t *)&int_dispatched_cost, sizeof(uint32_t), true);
     }
 
-    // Despacho por cantidad: reducir velocidad al 80%
-    if(m_dispatched_volume >= m_volume * 0.80 && m_quantity_dispatch && !already_stop)
-    {
-        already_stop = true;
-        this->m_state_callback_function((uint8_t*)&m_dispatched_volume, 4);
-    }
-
     // Despacho por cantidad: finalizar automáticamente al alcanzar el objetivo
     if(m_dispatched_volume >= m_volume && m_quantity_dispatch && this->m_counter == 1)
     {
@@ -609,20 +648,19 @@ void dispatch_state::screen(char p_key)
         uint32_t int_dispatched_cost = (uint32_t)(m_dispatched_cost * 100);
         this->m_device->write_to_address(DISPLAY_DISPATCHED_VOLUME_ADDRESS, (uint8_t *)&int_dispatched_liters, sizeof(uint32_t), true);
         this->m_device->write_to_address(DISPLAY_DISPATCHED_COST_ADDRESS, (uint8_t *)&int_dispatched_cost, sizeof(uint32_t), true);
-        this->m_state_callback_function((uint8_t *)&m_dispatched_volume, 3);
-        this->m_counter = 3;
+        finish_dispatch();
     }
 }
 
 void dispatch_state::reset()
 {
     dispatch_initialized = false;
-    already_stop = false;
     this->m_counter = 0;
     m_dispatched_volume = 0.0;
     m_dispatched_cost = 0.0;
     this->m_device->set_dispatching(false);
-    this->m_device->set_tag_detected(false);
+    this->m_device->stop_tag_reading();
+    this->m_device->tag_message_changed();
     m_volume = 0;
     m_quantity_dispatch = false;
 

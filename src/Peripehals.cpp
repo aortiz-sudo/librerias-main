@@ -69,14 +69,20 @@ status Peripehals::read_peripehal_data(float *p_voltage, uint8_t *p_sat_out, uin
 {
     uint8_t data[7];
     
+    // m_printer_connected habilita printer_write(). Se refresca en toda lectura,
+    // también en la periódica de main.cpp, que pasa su propia variable: si solo lo
+    // actualizara reset_printer() (que no se llama mientras la placa responde), se
+    // quedaría en 0 desde el arranque.
     if(!(read_data(data, 7) > 0))
     {
+        this->m_printer_connected = 0;
         *p_printer_connected = 0;
         return get_status();
     }
 
     *p_voltage = *((float *)&data[0]);
     *p_sat_out = data[4];
+    this->m_printer_connected = data[5];
     *p_printer_connected = data[5];
     this->m_data_received = data[6];
 
@@ -88,25 +94,43 @@ status Peripehals::printer_write(uint8_t *p_data, size_t p_length)
     if(this->m_printer_connected == 0)
         return NACK_ERROR;
 
+    status command_status = NO_DEVICE_ERROR;
+
+    for(size_t offset = 0; offset < p_length; offset += PRINTER_I2C_CHUNK_LEN)
+    {
+        size_t chunk = p_length - offset;
+
+        if(chunk > PRINTER_I2C_CHUNK_LEN)
+            chunk = PRINTER_I2C_CHUNK_LEN;
+
+        command_status = printer_write_chunk(&p_data[offset], chunk);
+
+        if(command_status != NO_DEVICE_ERROR)
+            return command_status;
+    }
+
+    return command_status;
+}
+
+status Peripehals::printer_write_chunk(const uint8_t *p_data, size_t p_length)
+{
     command_struct command;
 
-    size_t length = p_length + 1;
+    uint8_t data[PRINTER_I2C_CHUNK_LEN + 1] = { (uint8_t)p_length };
 
-    if(length > I2C_BUFFER_LENGTH)
-        length = I2C_BUFFER_LENGTH;
+    memcpy(&data[1], p_data, p_length);
 
-    uint8_t data[I2C_BUFFER_LENGTH] = { (uint8_t)p_length }; 
-
-    for(size_t i = 1; i < length; i++)
-        data[i] = p_data[i - 1];
-    
     command.address = this->m_address;
     command.type = I2C_PRINTER_PRINTER_PRINT_CMD;
     command.data = data;
-    command.length = length;
+    command.length = p_length + 1;
 
-    status command_status;
+    status command_status = NO_DEVICE_ERROR;
     uint8_t retries = 3;
+
+    // La confirmación que se espera es la de este bloque; un "ejecutado" que haya
+    // quedado de una lectura anterior haría que el bloque no se enviara.
+    this->m_data_received = false;
 
     while(!this->m_data_received && retries--)
     {

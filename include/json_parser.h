@@ -196,6 +196,49 @@ class JSON_Parser
         int parse_json(const char *p_json);
 
         /**
+         * \brief           Tokeniza los primeros p_length bytes de una cadena JSON.
+         * \details         No necesita que la cadena termine en nulo, así que sirve para
+         *                  tokenizar un solo objeto dentro de una respuesta más grande.
+         * \param p_json    Inicio del JSON a procesar.
+         * \param p_length  Número de bytes a procesar.
+         * \returns         Número de tokens encontrados o código de error.
+         */
+        int parse_json(const char *p_json, size_t p_length);
+
+        /**
+         * \brief               Copia como texto el valor (cadena o primitivo) de una clave de un objeto.
+         * \param p_json        Cadena JSON del último parseo.
+         * \param p_obj_index   Índice del token del objeto donde buscar.
+         * \param p_key         Clave a buscar.
+         * \param p_out         Buffer de destino (las cadenas se copian sin comillas).
+         * \param p_out_size    Tamaño del buffer de destino.
+         * \param p_is_null     Opcional: se pone en true si el valor es null (y p_out queda vacío).
+         * \returns             true si la clave existe y su valor es una cadena o un primitivo.
+         */
+        bool get_value_text(const char *p_json, int p_obj_index, const char *p_key, char *p_out, size_t p_out_size, bool *p_is_null = nullptr);
+
+        /**
+         * \brief           Busca, sin tokenizar el documento, el arreglo de una clave del objeto raíz.
+         * \details         Permite recorrer respuestas con más elementos de los que caben en
+         *                  JSON_MAX_TOKENS: cada elemento se obtiene con next_array_object() y
+         *                  se tokeniza por separado con parse_json(p_json, p_length).
+         * \param p_json    Cadena JSON terminada en nulo.
+         * \param p_key     Clave del objeto raíz cuyo valor es el arreglo (p. ej. "data").
+         * \returns         Puntero al '[' del arreglo, o nullptr si no existe.
+         */
+        static const char *find_root_array(const char *p_json, const char *p_key);
+
+        /**
+         * \brief           Obtiene el siguiente objeto de un arreglo.
+         * \param p_cursor  Posición actual. La primera vez, el valor que regresó find_root_array();
+         *                  al encontrar un objeto avanza hasta después de él.
+         * \param p_object  Inicio del objeto encontrado.
+         * \param p_length  Longitud del objeto, incluyendo las llaves.
+         * \returns         true si encontró un objeto; false al terminar el arreglo o si el JSON está incompleto.
+         */
+        static bool next_array_object(const char **p_cursor, const char **p_object, size_t *p_length);
+
+        /**
          * \brief               Busca una clave dentro de un objeto JSON.
          * \param p_json        Cadena JSON.
          * \param p_obj_index   Índice del token del objeto donde buscar.
@@ -391,6 +434,13 @@ class JSON_Parser
          * \returns         Tipo primitivo del token (entero, flotante, booleano, nulo o no primitivo).
          */
         json_primitive_type_t get_token_primitive_type(const char *p_json, const jsmntok_t *p_token);
+
+        /**
+         * \brief           Salta una cadena JSON, respetando las secuencias de escape.
+         * \param p_quote   Puntero a las comillas que abren la cadena.
+         * \returns         Puntero a las comillas que la cierran, o nullptr si la cadena no termina.
+         */
+        static const char *skip_string(const char *p_quote);
 };
 
 #endif

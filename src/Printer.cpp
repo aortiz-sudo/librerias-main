@@ -202,8 +202,15 @@ void Printer::print_last_ticket(ticket_struct *p_ticket)
     if(p_ticket->business_city)
     {
         printer_write(p_ticket->business_city);
-        printer_write(", ");
-        printer_write(p_ticket->business_state);
+
+        // build_ticket() deja el estado en nullptr si tiene 2 caracteres o menos
+        // (p. ej. "NL"); pasarlo a printer_write() haría strlen(nullptr).
+        if(p_ticket->business_state)
+        {
+            printer_write(", ");
+            printer_write(p_ticket->business_state);
+        }
+
         print_line_feed();
     }
 
@@ -327,8 +334,13 @@ void Printer::print_day_ticket(ticket_struct *p_tickets, size_t p_services)
     if(p_tickets[0].business_city)
     {
         printer_write(p_tickets[0].business_city);
-        printer_write(", ");
-        printer_write(p_tickets[0].business_state);
+
+        if(p_tickets[0].business_state)
+        {
+            printer_write(", ");
+            printer_write(p_tickets[0].business_state);
+        }
+
         print_line_feed();
     }
 

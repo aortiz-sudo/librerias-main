@@ -41,11 +41,24 @@ void UART_Device::begin(const device_param_struct *p_params)
        static_cast<HardwareSerial *>(get_port())->begin(get_transmission_rate(), this->m_config);
     #endif
 
+    // readBytes() no usa m_timeout: usa el timeout interno de Stream, que por
+    // defecto es 1000 ms. Sin propagarlo, cualquier respuesta mas corta de lo
+    // pedido bloquea un segundo entero por comando. Con m_timeout == 0 se deja
+    // el valor por omision, que es lo que espera el firmware de la impresora.
+    if(this->m_timeout > 0)
+        get_port()->setTimeout(this->m_timeout);
+
     if(this->m_enable_pin > -1)
     {
         pinMode(this->m_enable_pin, OUTPUT);
         digitalWrite(this->m_enable_pin, this->m_enable_state);
     }
+}
+
+void UART_Device::flush_input()
+{
+    while(get_port()->available())
+        get_port()->read();
 }
 
 size_t UART_Device::write_data(uint8_t *p_data, size_t p_data_length)

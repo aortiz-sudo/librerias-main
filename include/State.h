@@ -526,8 +526,31 @@ class dispatch_state : public State
         void reset() override;
 
     private:
+        /**
+         * \brief           Escribe un mensaje en el campo del tag (17 caracteres).
+         * \param p_message Mensaje a mostrar.
+         */
+        void write_message(const char *p_message);
+
+        /**
+         * \brief Arranca o reanuda el despacho: enciende los relés (pantalla 19).
+         */
+        void run_dispatch();
+
+        /**
+         * \brief Pausa el despacho como "detener": apaga los relés (pantalla 20).
+         */
+        void pause_dispatch();
+
+        /**
+         * \brief Termina el despacho: ticket y evento, y deja de leer el tag (pantalla 21).
+         */
+        void finish_dispatch();
+
         bool dispatch_initialized = false;
-        bool already_stop = false;
+        const char *m_clear_tag_message = "                 ";   ///< Texto para borrar el mensaje del tag.
+        const char *m_reading_tag_message = "Leyendo tag      "; ///< Mensaje mientras se espera el tag para iniciar.
+        const char *m_tag_found_message = "Tag detectado    ";   ///< Mensaje en pausa cuando se vuelve a leer el tag.
 };
 
 /**

@@ -15,6 +15,14 @@ status Display::send_command(command_struct *p_command)
     for(int i = 4; i < data_length; i++)
         data[i] = p_command->data[i - 4];
 
+    // El DWIN emite tramas no solicitadas (los codigos de tecla que devuelve el
+    // touch, simulado incluido) y puede entregar el ACK de un comando anterior
+    // despues de que se agoto su espera. Si esos bytes se quedan en RX, la
+    // lectura de abajo los toma por el ACK de este comando y se queda esperando
+    // los que faltan, de modo que cada comando pasa a costar el timeout completo
+    // y el ATmega deja de drenar la cola al ritmo al que el ESP32 la llena.
+    flush_input();
+
     write_data(data, data_length);
 
     // Leer respuesta tanto para lectura (0x83) como escritura (0x82 → ACK "OK").
