@@ -40,12 +40,16 @@
 #endif
 
 /* Timeouts */
-#define BOOTLOADER_TIMEOUT_MS   5000    // 5 segundos sin comando = arrancar app
+#define BOOTLOADER_TIMEOUT_MS   5000    // 5 segundos sin comando = arrancar app (solo si hay app válida)
 #define I2C_TIMEOUT_MS          2500    // Timeout para operaciones I2C
+#define FLASHING_TIMEOUT_MS     10000   // Sin comandos a mitad del flasheo: reiniciar y esperar sin app
+#define ERROR_REPORT_MS         3000    // Tiempo que se reporta un error antes de reiniciar
+#define SUCCESS_START_MS        2000    // Tras un CRC correcto, arrancar la app aunque no llegue START_APPLICATION
 
 /* Tamaños de buffer */
 #define MAX_PAYLOAD_SIZE        128     // Tamaño de página SPM
-#define I2C_BUFFER_SIZE         (MAX_PAYLOAD_SIZE + 2)
+#define FLASH_FRAME_SIZE        (MAX_PAYLOAD_SIZE + 3)  // [CMD][SIZE][RESERVADO][128 datos]
+#define I2C_BUFFER_SIZE         FLASH_FRAME_SIZE
 
 /* Comandos I2C - Compatible con ESP32 */
 typedef enum
@@ -77,7 +81,8 @@ typedef enum
     ERROR_WRITE_FAILED,
     ERROR_CRC_MISMATCH,
     ERROR_TIMEOUT,
-    ERROR_BUFFER_OVERFLOW
+    ERROR_BUFFER_OVERFLOW,
+    ERROR_NO_APP            // En reposo sin app válida (página 0 vacía): el ESP32 debe flashear
 } error_code_t;
 
 /* Estructura para datos recibidos */
