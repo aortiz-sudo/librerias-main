@@ -1,6 +1,22 @@
 #include "Logger.h"
+#include <freertos/semphr.h>
 
 Logger logger;
+
+/// Serializa el log entre tareas. En release cada mensaje abre, escribe y cierra /data.log
+/// sobre el mismo objeto File; varias tareas en los dos núcleos lo hacían a la vez y
+/// corrompían el heap (CORRUPT HEAP en File::close()). Recursivo: log() llama a log_date()
+/// y a write() dentro de la misma tarea.
+static SemaphoreHandle_t log_mutex = nullptr;
+
+namespace
+{
+    struct Log_Lock
+    {
+        Log_Lock()  { if(log_mutex) xSemaphoreTakeRecursive(log_mutex, portMAX_DELAY); }
+        ~Log_Lock() { if(log_mutex) xSemaphoreGiveRecursive(log_mutex); }
+    };
+}
 
 /**
  * \brief Salida que descarta todo. Sustituye al puerto serie mientras el log está
@@ -17,6 +33,7 @@ static Null_Print null_print;
 
 void Logger::set_serial_muted(bool p_muted)
 {
+    Log_Lock lock;
     if(this->m_use_file)
         return;
 
@@ -31,6 +48,9 @@ void Logger::set_serial_muted(bool p_muted)
 
 void Logger::begin(bool p_debug)
 {
+    if(log_mutex == nullptr)
+        log_mutex = xSemaphoreCreateRecursiveMutex();
+
     if(!p_debug)
     {
         if(!SD.exists(LOG_PATH))
@@ -52,6 +72,7 @@ void Logger::begin(bool p_debug)
 
 size_t Logger::write(uint8_t p_data)
 {
+    Log_Lock lock;
     size_t count = 0;
 
     if(!this->m_logger)
@@ -64,6 +85,7 @@ size_t Logger::write(uint8_t p_data)
 
 size_t Logger::write(const uint8_t *p_data, size_t p_length)
 {
+    Log_Lock lock;
     size_t count = 0;
 
     if(!this->m_logger)
@@ -76,6 +98,7 @@ size_t Logger::write(const uint8_t *p_data, size_t p_length)
 
 void Logger::log_date()
 {
+    Log_Lock lock;
     if(this->m_use_file)
     {
         char date[32];
@@ -90,6 +113,7 @@ void Logger::log_date()
 
 void Logger::log(const __FlashStringHelper *ifsh)
 { 
+    Log_Lock lock;
     if(this->m_use_file)
         this->m_file_logger = SD.open(LOG_PATH, FILE_APPEND);
 
@@ -102,6 +126,7 @@ void Logger::log(const __FlashStringHelper *ifsh)
 
 void Logger::log(const char *p_data)
 {
+    Log_Lock lock;
     if(this->m_use_file)
         this->m_file_logger = SD.open(LOG_PATH, FILE_APPEND);
 
@@ -114,6 +139,7 @@ void Logger::log(const char *p_data)
 
 void Logger::log(char p_data)
 {
+    Log_Lock lock;
     if(this->m_use_file)
         this->m_file_logger = SD.open(LOG_PATH, FILE_APPEND);
 
@@ -126,6 +152,7 @@ void Logger::log(char p_data)
 
 void Logger::log(unsigned char p_data, int base)
 {
+    Log_Lock lock;
     if(this->m_use_file)
         this->m_file_logger = SD.open(LOG_PATH, FILE_APPEND);
 
@@ -138,6 +165,7 @@ void Logger::log(unsigned char p_data, int base)
 
 void Logger::log(int p_data, int base)
 {
+    Log_Lock lock;
     if(this->m_use_file)
         this->m_file_logger = SD.open(LOG_PATH, FILE_APPEND);
 
@@ -150,6 +178,7 @@ void Logger::log(int p_data, int base)
 
 void Logger::log(unsigned int p_data, int base)
 {
+    Log_Lock lock;
     if(this->m_use_file)
         this->m_file_logger = SD.open(LOG_PATH, FILE_APPEND);
 
@@ -162,6 +191,7 @@ void Logger::log(unsigned int p_data, int base)
 
 void Logger::log(long p_data, int base)
 {
+    Log_Lock lock;
     if(this->m_use_file)
         this->m_file_logger = SD.open(LOG_PATH, FILE_APPEND);
 
@@ -174,6 +204,7 @@ void Logger::log(long p_data, int base)
 
 void Logger::log(unsigned long p_data, int base)
 {
+    Log_Lock lock;
     if(this->m_use_file)
         this->m_file_logger = SD.open(LOG_PATH, FILE_APPEND);    
 
@@ -186,6 +217,7 @@ void Logger::log(unsigned long p_data, int base)
 
 void Logger::log(long long p_data, int base)
 {
+    Log_Lock lock;
     if(this->m_use_file)
         this->m_file_logger = SD.open(LOG_PATH, FILE_APPEND);
 
@@ -198,6 +230,7 @@ void Logger::log(long long p_data, int base)
 
 void Logger::log(unsigned long long p_data, int base)
 {
+    Log_Lock lock;
     if(this->m_use_file)
         this->m_file_logger = SD.open(LOG_PATH, FILE_APPEND);
 
@@ -210,6 +243,7 @@ void Logger::log(unsigned long long p_data, int base)
 
 void Logger::log(double p_data, int dec)
 {
+    Log_Lock lock;
     if(this->m_use_file)
         this->m_file_logger = SD.open(LOG_PATH, FILE_APPEND);
 
@@ -222,6 +256,7 @@ void Logger::log(double p_data, int dec)
 
 void Logger::log(const Printable& p_data)
 {
+    Log_Lock lock;
     if(this->m_use_file)
         this->m_file_logger = SD.open(LOG_PATH, FILE_APPEND);
 
@@ -234,6 +269,7 @@ void Logger::log(const Printable& p_data)
 
 void Logger::logln(const __FlashStringHelper *ifsh)
 { 
+    Log_Lock lock;
     if(this->m_use_file)
         this->m_file_logger = SD.open(LOG_PATH, FILE_APPEND);
 
@@ -247,6 +283,7 @@ void Logger::logln(const __FlashStringHelper *ifsh)
 
 void Logger::logln(const char *p_data)
 {
+    Log_Lock lock;
     if(this->m_use_file)
         this->m_file_logger = SD.open(LOG_PATH, FILE_APPEND);
 
@@ -259,6 +296,7 @@ void Logger::logln(const char *p_data)
 
 void Logger::logln(char p_data)
 {
+    Log_Lock lock;
     if(this->m_use_file)
         this->m_file_logger = SD.open(LOG_PATH, FILE_APPEND);
 
@@ -271,6 +309,7 @@ void Logger::logln(char p_data)
 
 void Logger::logln(unsigned char p_data, int base)
 {
+    Log_Lock lock;
     if(this->m_use_file)
         this->m_file_logger = SD.open(LOG_PATH, FILE_APPEND);
 
@@ -283,6 +322,7 @@ void Logger::logln(unsigned char p_data, int base)
 
 void Logger::logln(int p_data, int base)
 {
+    Log_Lock lock;
     if(this->m_use_file)
         this->m_file_logger = SD.open(LOG_PATH, FILE_APPEND);
 
@@ -295,6 +335,7 @@ void Logger::logln(int p_data, int base)
 
 void Logger::logln(unsigned int p_data, int base)
 {
+    Log_Lock lock;
     if(this->m_use_file)
         this->m_file_logger = SD.open(LOG_PATH, FILE_APPEND);
 
@@ -307,6 +348,7 @@ void Logger::logln(unsigned int p_data, int base)
 
 void Logger::logln(long p_data, int base)
 {
+    Log_Lock lock;
     if(this->m_use_file)
         this->m_file_logger = SD.open(LOG_PATH, FILE_APPEND);
 
@@ -319,6 +361,7 @@ void Logger::logln(long p_data, int base)
 
 void Logger::logln(unsigned long p_data, int base)
 {
+    Log_Lock lock;
     if(this->m_use_file)
         this->m_file_logger = SD.open(LOG_PATH, FILE_APPEND);
 
@@ -331,6 +374,7 @@ void Logger::logln(unsigned long p_data, int base)
 
 void Logger::logln(long long p_data, int base)
 {
+    Log_Lock lock;
     if(this->m_use_file)
         this->m_file_logger = SD.open(LOG_PATH, FILE_APPEND);
 
@@ -343,6 +387,7 @@ void Logger::logln(long long p_data, int base)
 
 void Logger::logln(unsigned long long p_data, int base)
 {
+    Log_Lock lock;
     if(this->m_use_file)
         this->m_file_logger = SD.open(LOG_PATH, FILE_APPEND);
 
@@ -355,6 +400,7 @@ void Logger::logln(unsigned long long p_data, int base)
 
 void Logger::logln(double p_data, int dec)
 {
+    Log_Lock lock;
     if(this->m_use_file)
         this->m_file_logger = SD.open(LOG_PATH, FILE_APPEND);
 
@@ -367,6 +413,7 @@ void Logger::logln(double p_data, int dec)
 
 void Logger::logln(const Printable& p_data)
 {
+    Log_Lock lock;
     if(this->m_use_file)
         this->m_file_logger = SD.open(LOG_PATH, FILE_APPEND);
 
@@ -379,6 +426,7 @@ void Logger::logln(const Printable& p_data)
 
 void Logger::logln(void)
 {
+    Log_Lock lock;
     if(this->m_use_file)
         this->m_file_logger = SD.open(LOG_PATH, FILE_APPEND);
 
