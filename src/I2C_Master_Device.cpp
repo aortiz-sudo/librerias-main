@@ -140,8 +140,9 @@ status I2C_Master_Device::burn_firmware(File *p_file, size_t p_file_size)
     uint8_t main_app_address = this->m_address;
     reset_device();
 
-    // Esperar a que el bootloader arranque y esté listo
-    vTaskDelay(1000 / portTICK_PERIOD_MS); // Esperar 1 segundo para dar tiempo al bootloader a arrancar
+    // Con app válida, el bootloader solo espera 1 s antes de volver a arrancarla: hay que
+    // buscarlo enseguida (device_ready() sondea cada 10 ms). Antes se esperaba 1 s fijo.
+    vTaskDelay(20 / portTICK_PERIOD_MS);
 
     if(!device_ready())
     {

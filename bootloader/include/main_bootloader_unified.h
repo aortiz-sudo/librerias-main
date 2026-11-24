@@ -40,7 +40,11 @@
 #endif
 
 /* Timeouts */
-#define BOOTLOADER_TIMEOUT_MS   5000    // 5 segundos sin comando = arrancar app (solo si hay app válida)
+// Con app válida, ventana tras cada reinicio para que el ESP32 empiece a flashear (lo busca en
+// cuanto manda el reinicio). Corta a propósito: la app del display se reinicia sola por su
+// watchdog si pasa ~1 s sin transmitir a la pantalla, y cada reinicio la deja sin responder
+// lo que dure esta ventana (antes eran 6 s: 1 s de parpadeos más 5 s de espera).
+#define BOOTLOADER_TIMEOUT_MS   1000
 #define I2C_TIMEOUT_MS          2500    // Timeout para operaciones I2C
 #define FLASHING_TIMEOUT_MS     10000   // Sin comandos a mitad del flasheo: reiniciar y esperar sin app
 #define ERROR_REPORT_MS         3000    // Tiempo que se reporta un error antes de reiniciar

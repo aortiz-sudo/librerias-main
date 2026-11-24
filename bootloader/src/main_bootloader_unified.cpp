@@ -34,6 +34,11 @@ static volatile uint32_t bootloader_start_time = 0;
 static uint32_t last_command_time = 0;
 static uint32_t state_since = 0;
 
+// Marca en SRAM (el crt no la inicializa: sobrevive a un reinicio por watchdog) para arrancar
+// la app justo después de reiniciar, con todos los periféricos en su estado de reset.
+#define START_APP_MAGIC 0x5AA5C33CUL
+static volatile uint32_t start_app_flag __attribute__((section(".noinit")));
+
 /* Prototipos de funciones */
 static void init_hardware(void);
 static void init_i2c_slave(uint8_t address);
@@ -116,8 +121,10 @@ ISR(TWI0_vect)
 
         default:
         {
-            // Error, resetear TWI
-            TWCR0 = (1 << TWEN) | (1 << TWIE) | (1 << TWINT) | (1 << TWEA);
+            // Error de bus (START/STOP fuera de lugar) u otro estado: TWSTO en modo esclavo
+            // regresa el TWI a "no direccionado" y libera SDA/SCL. Sin él, tras un error de
+            // bus el TWI podía dejar de reconocer su dirección.
+            TWCR0 = (1 << TWEN) | (1 << TWIE) | (1 << TWINT) | (1 << TWEA) | (1 << TWSTO);
             break;
         }
     }
@@ -131,6 +138,19 @@ ISR(TIMER0_COMPA_vect)
 
 int main(void)
 {
+    // Arranque de la app pedido por start_application(): se llega por un reinicio de watchdog
+    // y se salta antes de tocar cualquier periférico. Saltar directo desde el bootloader (con el
+    // TWI, el Timer0 y los vectores ya usados) dejaba la app del display sin arrancar.
+    if((MCUSR & (1 << WDRF)) && start_app_flag == START_APP_MAGIC)
+    {
+        start_app_flag = 0;
+        MCUSR = 0;
+        WDTCSR = (1 << WDCE) | (1 << WDE);
+        WDTCSR = 0x00;
+        __asm__ __volatile__("jmp 0");
+    }
+
+    start_app_flag = 0;
     init_hardware();
 
     bootloader_start_time = get_millis();
@@ -225,20 +245,12 @@ static void init_hardware(void)
     MCUCR = (1 << IVCE);
     MCUCR = (1 << IVSEL);
 
-    // Inicializar LEDs
+    // Inicializar LEDs. Sin el patrón de inicio bloqueante (5 parpadeos, 1 s): retrasaba el
+    // I2C y alargaba cada reinicio de la app.
     LED_STATUS_INIT();
     LED_ERROR_INIT();
     LED_STATUS_ON();
     LED_ERROR_OFF();
-
-    // Patrón de inicio: 5 parpadeos rápidos
-    for(uint8_t i = 0; i < 5; i++)
-    {
-        LED_STATUS_OFF();
-        _delay_ms(100);
-        LED_STATUS_ON();
-        _delay_ms(100);
-    }
 
     // Configurar Timer0 para millis()
     TCCR0A = (1 << WGM01);              // CTC mode
@@ -560,40 +572,15 @@ static uint8_t status_byte(void)
 }
 
 //INICIO DE APLICACIÓN
+// La app no se arranca con un salto directo: se marca start_app_flag y se reinicia por
+// watchdog. main() ve la marca y salta a la app antes de configurar nada, así que la app
+// arranca con todos los periféricos (TWI, timers, puertos, IVSEL) en su estado de reset.
 static void start_application(void)
 {
-    cli();
-
-    // Desactivar watchdog
-    MCUSR &= ~(1 << WDRF);
-    WDTCSR |= (1 << WDCE) | (1 << WDE);
-    WDTCSR = 0x00;
-
-    // Desactivar TWI
-    TWCR0 = 0x00;
-
-    // Desactivar Timer0
-    TCCR0B = 0x00;
-    TIMSK0 = 0x00;
-
-    // Apagar LEDs
     LED_STATUS_OFF();
     LED_ERROR_OFF();
-
-    // Regresar los vectores de interrupción a la app (0x0000)
-    MCUCR = (1 << IVCE);
-    MCUCR = 0;
-
-    // Saltar a aplicación
-    __asm__ __volatile__(
-        "clr r1\n\t"
-        "jmp %0"
-        :
-        : "i" (USER_APP_START_ADDR)
-    );
-
-    // Nunca llega aquí
-    while(1);
+    start_app_flag = START_APP_MAGIC;
+    reset_bootloader();
 }
 
 // Reinicio por watchdog: el bootloader vuelve a empezar (y se queda esperando si no hay app)
