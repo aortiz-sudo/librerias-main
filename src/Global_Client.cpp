@@ -26,12 +26,12 @@ bool Global_Client::connect_to_server()
             // Siempre se asigna: si quedara la hora de una conexión anterior, la
             // validación usaría una fecha vieja.
             this->m_ssl_client.setX509Time(this->m_x509_time);
-            logger.logln("Certificado SSL establecido.");
+            logger.debugln("Certificado SSL establecido.");
         }
         else
         {
             this->m_ssl_client.setInsecure();
-            logger.logln("Conexion SSL insegura");
+            logger.debugln("Conexion SSL insegura");
         }
 
         this->m_ssl_client.setClient(&this->m_client);
@@ -42,36 +42,56 @@ bool Global_Client::connect_to_server()
     else
         this->m_global_client = &this->m_client;
     
-    logger.logln("Intentando conectar al servidor...");
-    
+    logger.debugln("Intentando conectar al servidor...");
+
     if(this->m_global_client->connect(this->m_server, this->m_port))
     {
-        logger.logln("Conectado al servidor");
+        if(this->m_connect_failed)
+        {
+            logger.log("Conexion restablecida con ");
+            logger.logln(this->m_server);
+        }
+        else
+            logger.debugln("Conectado al servidor");
+
+        this->m_connect_failed = false;
         return true;
     }
-    else
+
+    // Solo se registra el primer fallo de una racha: con el servidor caído Socket.IO
+    // reintenta cada pocos segundos y cada intento escribía hasta 4 renglones en la SD.
+    if(this->m_connect_failed)
     {
-        logger.logln("No se pudo conectar al servidor");
-
-        // Con TLS, la librería guarda el motivo: 0 si falló antes (DNS o TCP), -1000 si no
-        // hubo memoria para el handshake, o el error de BearSSL (p. ej. certificado no confiable).
-        if(this->m_secure)
-        {
-            char reason[64] = "";
-            int code = this->m_ssl_client.getLastSSLError(reason, sizeof(reason));
-            logger.log("Error TLS: ");
-            logger.log(code);
-            logger.log(" ");
-            logger.logln(reason);
-            logger.log("Heap libre: ");
-            logger.log((unsigned long)ESP.getFreeHeap());
-            logger.log(", bloque maximo: ");
-            logger.logln((unsigned long)ESP.getMaxAllocHeap());
-        }
-
+        logger.debugln("No se pudo conectar al servidor");
         this->m_global_client->stop();
         return false;
     }
+
+    this->m_connect_failed = true;
+
+    logger.log("No se pudo conectar a ");
+    logger.log(this->m_server);
+    logger.log(":");
+    logger.logln((unsigned int)this->m_port);
+
+    // Con TLS, la librería guarda el motivo: 0 si falló antes (DNS o TCP), -1000 si no
+    // hubo memoria para el handshake, o el error de BearSSL (p. ej. certificado no confiable).
+    if(this->m_secure)
+    {
+        char reason[64] = "";
+        int code = this->m_ssl_client.getLastSSLError(reason, sizeof(reason));
+        logger.log("Error TLS: ");
+        logger.log(code);
+        logger.log(" ");
+        logger.logln(reason);
+        logger.log("Heap libre: ");
+        logger.log((unsigned long)ESP.getFreeHeap());
+        logger.log(", bloque maximo: ");
+        logger.logln((unsigned long)ESP.getMaxAllocHeap());
+    }
+
+    this->m_global_client->stop();
+    return false;
 }
 
 int Global_Client::http_response(const char p_headers[][128], char p_headers_values[][64], int p_headers_count, uint8_t *p_data, size_t p_data_length)

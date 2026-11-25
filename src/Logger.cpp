@@ -102,336 +102,104 @@ void Logger::log_date()
     if(this->m_use_file)
     {
         char date[32];
-        snprintf(date, sizeof(date) - 1,"20%02u/%02u/%02u %02u:%02u:%02u --> ", *this->m_rtc[0], *this->m_rtc[1], *this->m_rtc[2], 
+        snprintf(date, sizeof(date) - 1,"20%02u/%02u/%02u %02u:%02u:%02u --> ", *this->m_rtc[0], *this->m_rtc[1], *this->m_rtc[2],
                                                               *this->m_rtc[3], *this->m_rtc[4], *this->m_rtc[5]);
 
-         
+
         date[sizeof(date) - 1] = '\0';
         print(date);
     }
 }
 
-void Logger::log(const __FlashStringHelper *ifsh)
-{ 
-    Log_Lock lock;
-    if(this->m_use_file)
-        this->m_file_logger = SD.open(LOG_PATH, FILE_APPEND);
+bool Logger::open_file()
+{
+    this->m_file_logger = SD.open(LOG_PATH, FILE_APPEND);
 
-    log_date();
-    this->m_logger->print(reinterpret_cast<const char *>(ifsh)); 
-    
-    if(this->m_use_file)
+    if(!this->m_file_logger)
+        return false;
+
+    // Solo se rota entre renglones, para no partir uno en los dos archivos.
+    if(this->m_at_line_start && this->m_file_logger.size() >= LOG_MAX_SIZE)
+    {
         this->m_file_logger.close();
+
+        if(SD.exists(LOG_OLD_PATH))
+            SD.remove(LOG_OLD_PATH);
+
+        // Si no se pudiera renombrar, FILE_WRITE empieza /data.log desde cero: se pierde
+        // lo anterior, pero el log no crece sin límite.
+        SD.rename(LOG_PATH, LOG_OLD_PATH);
+        this->m_file_logger = SD.open(LOG_PATH, FILE_WRITE, true);
+    }
+
+    return (bool)this->m_file_logger;
 }
 
-void Logger::log(const char *p_data)
+template<typename... Args>
+void Logger::entry(bool p_newline, const Args&... p_args)
 {
     Log_Lock lock;
-    if(this->m_use_file)
-        this->m_file_logger = SD.open(LOG_PATH, FILE_APPEND);
 
-    log_date();
-    this->m_logger->print(p_data);
-    
-    if(this->m_use_file)
-        this->m_file_logger.close();
-}
+    // Sin begin() (en release, si la SD no montó) no hay salida. Antes print() se
+    // llamaba sobre nullptr y el equipo se reiniciaba en el arranque.
+    if(this->m_logger == nullptr)
+        return;
 
-void Logger::log(char p_data)
-{
-    Log_Lock lock;
-    if(this->m_use_file)
-        this->m_file_logger = SD.open(LOG_PATH, FILE_APPEND);
+    if(this->m_use_file && !open_file())
+        return;
 
-    log_date();
-    this->m_logger->print(p_data);
-    
-    if(this->m_use_file)
-        this->m_file_logger.close();
-}
+    TaskHandle_t task = xTaskGetCurrentTaskHandle();
 
-void Logger::log(unsigned char p_data, int base)
-{
-    Log_Lock lock;
-    if(this->m_use_file)
-        this->m_file_logger = SD.open(LOG_PATH, FILE_APPEND);
+    if(!this->m_at_line_start && task != this->m_line_owner)
+    {
+        this->m_logger->println();
+        this->m_at_line_start = true;
+    }
 
-    log_date();
-    this->m_logger->print(p_data, base);
-    
-    if(this->m_use_file)
-        this->m_file_logger.close();
-}
+    // logln() sin argumentos solo termina el renglón: no lleva fecha.
+    if constexpr (sizeof...(p_args) == 0)
+        this->m_logger->println();
+    else
+    {
+        if(this->m_at_line_start)
+            log_date();
 
-void Logger::log(int p_data, int base)
-{
-    Log_Lock lock;
-    if(this->m_use_file)
-        this->m_file_logger = SD.open(LOG_PATH, FILE_APPEND);
+        if(p_newline)
+            this->m_logger->println(p_args...);
+        else
+            this->m_logger->print(p_args...);
+    }
 
-    log_date();
-    this->m_logger->print(p_data, base);
-    
-    if(this->m_use_file)
-        this->m_file_logger.close();
-}
-
-void Logger::log(unsigned int p_data, int base)
-{
-    Log_Lock lock;
-    if(this->m_use_file)
-        this->m_file_logger = SD.open(LOG_PATH, FILE_APPEND);
-
-    log_date();
-    this->m_logger->print(p_data, base);
-    
-    if(this->m_use_file)
-        this->m_file_logger.close();
-}
-
-void Logger::log(long p_data, int base)
-{
-    Log_Lock lock;
-    if(this->m_use_file)
-        this->m_file_logger = SD.open(LOG_PATH, FILE_APPEND);
-
-    log_date();
-    this->m_logger->print(p_data, base);
-    
-    if(this->m_use_file)
-        this->m_file_logger.close();
-}
-
-void Logger::log(unsigned long p_data, int base)
-{
-    Log_Lock lock;
-    if(this->m_use_file)
-        this->m_file_logger = SD.open(LOG_PATH, FILE_APPEND);    
-
-    log_date();
-    this->m_logger->print(p_data, base);
-    
-    if(this->m_use_file)
-        this->m_file_logger.close();
-}
-
-void Logger::log(long long p_data, int base)
-{
-    Log_Lock lock;
-    if(this->m_use_file)
-        this->m_file_logger = SD.open(LOG_PATH, FILE_APPEND);
-
-    log_date();
-    this->m_logger->print(p_data, base);
-    
-    if(this->m_use_file)
-        this->m_file_logger.close();
-}
-
-void Logger::log(unsigned long long p_data, int base)
-{
-    Log_Lock lock;
-    if(this->m_use_file)
-        this->m_file_logger = SD.open(LOG_PATH, FILE_APPEND);
-
-    log_date();
-    this->m_logger->print(p_data, base);
-    
-    if(this->m_use_file)
-        this->m_file_logger.close();
-}
-
-void Logger::log(double p_data, int dec)
-{
-    Log_Lock lock;
-    if(this->m_use_file)
-        this->m_file_logger = SD.open(LOG_PATH, FILE_APPEND);
-
-    log_date();
-    this->m_logger->print(p_data, dec);
-    
-    if(this->m_use_file)
-        this->m_file_logger.close();
-}
-
-void Logger::log(const Printable& p_data)
-{
-    Log_Lock lock;
-    if(this->m_use_file)
-        this->m_file_logger = SD.open(LOG_PATH, FILE_APPEND);
-
-    log_date();
-    this->m_logger->print(p_data);
-    
-    if(this->m_use_file)
-        this->m_file_logger.close();
-}
-
-void Logger::logln(const __FlashStringHelper *ifsh)
-{ 
-    Log_Lock lock;
-    if(this->m_use_file)
-        this->m_file_logger = SD.open(LOG_PATH, FILE_APPEND);
-
-    log_date();
-    this->m_logger->println(reinterpret_cast<const char *>(ifsh)); 
-    
-    if(this->m_use_file)
-        this->m_file_logger.close();
-    
-}
-
-void Logger::logln(const char *p_data)
-{
-    Log_Lock lock;
-    if(this->m_use_file)
-        this->m_file_logger = SD.open(LOG_PATH, FILE_APPEND);
-
-    log_date();
-    this->m_logger->println(p_data);
+    this->m_at_line_start = p_newline;
+    this->m_line_owner = task;
 
     if(this->m_use_file)
         this->m_file_logger.close();
 }
 
-void Logger::logln(char p_data)
-{
-    Log_Lock lock;
-    if(this->m_use_file)
-        this->m_file_logger = SD.open(LOG_PATH, FILE_APPEND);
+void Logger::log(const __FlashStringHelper *ifsh)              { entry(false, reinterpret_cast<const char *>(ifsh)); }
+void Logger::log(const char *p_data)                           { entry(false, p_data); }
+void Logger::log(char p_data)                                  { entry(false, p_data); }
+void Logger::log(unsigned char p_data, int base)               { entry(false, p_data, base); }
+void Logger::log(int p_data, int base)                         { entry(false, p_data, base); }
+void Logger::log(unsigned int p_data, int base)                { entry(false, p_data, base); }
+void Logger::log(long p_data, int base)                        { entry(false, p_data, base); }
+void Logger::log(unsigned long p_data, int base)               { entry(false, p_data, base); }
+void Logger::log(long long p_data, int base)                   { entry(false, p_data, base); }
+void Logger::log(unsigned long long p_data, int base)          { entry(false, p_data, base); }
+void Logger::log(double p_data, int dec)                       { entry(false, p_data, dec); }
+void Logger::log(const Printable& p_data)                      { entry(false, p_data); }
 
-    log_date();
-    this->m_logger->println(p_data);
-
-    if(this->m_use_file)
-        this->m_file_logger.close();
-}
-
-void Logger::logln(unsigned char p_data, int base)
-{
-    Log_Lock lock;
-    if(this->m_use_file)
-        this->m_file_logger = SD.open(LOG_PATH, FILE_APPEND);
-
-    log_date();
-    this->m_logger->println(p_data, base);
-
-    if(this->m_use_file)
-        this->m_file_logger.close();
-}
-
-void Logger::logln(int p_data, int base)
-{
-    Log_Lock lock;
-    if(this->m_use_file)
-        this->m_file_logger = SD.open(LOG_PATH, FILE_APPEND);
-
-    log_date();
-    this->m_logger->println(p_data, base);
-
-    if(this->m_use_file)
-        this->m_file_logger.close();
-}
-
-void Logger::logln(unsigned int p_data, int base)
-{
-    Log_Lock lock;
-    if(this->m_use_file)
-        this->m_file_logger = SD.open(LOG_PATH, FILE_APPEND);
-
-    log_date();
-    this->m_logger->println(p_data, base);
-
-    if(this->m_use_file)
-        this->m_file_logger.close();
-}
-
-void Logger::logln(long p_data, int base)
-{
-    Log_Lock lock;
-    if(this->m_use_file)
-        this->m_file_logger = SD.open(LOG_PATH, FILE_APPEND);
-
-    log_date();
-    this->m_logger->println(p_data, base);
-
-    if(this->m_use_file)
-        this->m_file_logger.close();
-}
-
-void Logger::logln(unsigned long p_data, int base)
-{
-    Log_Lock lock;
-    if(this->m_use_file)
-        this->m_file_logger = SD.open(LOG_PATH, FILE_APPEND);
-
-    log_date();
-    this->m_logger->println(p_data, base);
-
-    if(this->m_use_file)
-        this->m_file_logger.close();
-}
-
-void Logger::logln(long long p_data, int base)
-{
-    Log_Lock lock;
-    if(this->m_use_file)
-        this->m_file_logger = SD.open(LOG_PATH, FILE_APPEND);
-
-    log_date();
-    this->m_logger->println(p_data, base);
-
-    if(this->m_use_file)
-        this->m_file_logger.close();
-}
-
-void Logger::logln(unsigned long long p_data, int base)
-{
-    Log_Lock lock;
-    if(this->m_use_file)
-        this->m_file_logger = SD.open(LOG_PATH, FILE_APPEND);
-
-    log_date();
-    this->m_logger->println(p_data, base);
-
-    if(this->m_use_file)
-        this->m_file_logger.close();
-}
-
-void Logger::logln(double p_data, int dec)
-{
-    Log_Lock lock;
-    if(this->m_use_file)
-        this->m_file_logger = SD.open(LOG_PATH, FILE_APPEND);
-
-    log_date();
-    this->m_logger->println(p_data, dec);
-
-    if(this->m_use_file)
-        this->m_file_logger.close();
-}
-
-void Logger::logln(const Printable& p_data)
-{
-    Log_Lock lock;
-    if(this->m_use_file)
-        this->m_file_logger = SD.open(LOG_PATH, FILE_APPEND);
-
-    log_date();
-    this->m_logger->println(p_data);
-
-    if(this->m_use_file)
-        this->m_file_logger.close();
-}
-
-void Logger::logln(void)
-{
-    Log_Lock lock;
-    if(this->m_use_file)
-        this->m_file_logger = SD.open(LOG_PATH, FILE_APPEND);
-
-    this->m_logger->println();
-
-    if(this->m_use_file)
-        this->m_file_logger.close();
-}
+void Logger::logln(const __FlashStringHelper *ifsh)            { entry(true, reinterpret_cast<const char *>(ifsh)); }
+void Logger::logln(const char *p_data)                         { entry(true, p_data); }
+void Logger::logln(char p_data)                                { entry(true, p_data); }
+void Logger::logln(unsigned char p_data, int base)             { entry(true, p_data, base); }
+void Logger::logln(int p_data, int base)                       { entry(true, p_data, base); }
+void Logger::logln(unsigned int p_data, int base)              { entry(true, p_data, base); }
+void Logger::logln(long p_data, int base)                      { entry(true, p_data, base); }
+void Logger::logln(unsigned long p_data, int base)             { entry(true, p_data, base); }
+void Logger::logln(long long p_data, int base)                 { entry(true, p_data, base); }
+void Logger::logln(unsigned long long p_data, int base)        { entry(true, p_data, base); }
+void Logger::logln(double p_data, int dec)                     { entry(true, p_data, dec); }
+void Logger::logln(const Printable& p_data)                    { entry(true, p_data); }
+void Logger::logln(void)                                       { entry(true); }

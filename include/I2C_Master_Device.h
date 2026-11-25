@@ -168,6 +168,7 @@ class I2C_Master_Device : public Device
         static int8_t m_scl_pin;           ///< Pin SCL configurado.
         static int8_t m_sda_pin;           ///< Pin SDA configurado.
         uint8_t m_address = 0;                  ///< Dirección I2C del dispositivo.
+        uint8_t m_last_i2c_error = 0;           ///< Resultado de la escritura anterior (el log solo registra los cambios).
 
     protected:
         /**

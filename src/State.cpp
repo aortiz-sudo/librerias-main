@@ -46,7 +46,7 @@ void State::handle_special_key(char p_key, uint8_t p_counter)
             {
                 this->m_counter = decrement_counter(this->m_counter, this->m_max_counter);
                 this->m_device->request_pic_update();
-                logger.logln(this->m_counter);
+                logger.debugln(this->m_counter);
             }
             return;
 
@@ -55,7 +55,7 @@ void State::handle_special_key(char p_key, uint8_t p_counter)
             {
                 this->m_counter = increment_counter(this->m_counter, this->m_max_counter);
                 this->m_device->request_pic_update();
-                logger.logln(this->m_counter);
+                logger.debugln(this->m_counter);
             }
             return;
 
@@ -79,7 +79,7 @@ void State::handle_special_key(char p_key, uint8_t p_counter)
 
 void initial_state::draw()
 {
-    logger.logln("PANTALLA INICIAL\r\nPresione cualquier tecla para iniciar");
+    logger.debugln("PANTALLA INICIAL\r\nPresione cualquier tecla para iniciar");
     this->m_device->change_pic();
 
     this->m_state_callback_function(nullptr, 0);
@@ -98,7 +98,7 @@ void initial_state::reset()
 
 void login_state::draw()
 {
-    logger.logln("PANTALLA LOGIN\r\nIntroduzca la contraseña");
+    logger.debugln("PANTALLA LOGIN\r\nIntroduzca la contraseña");
     this->m_device->change_pic();
     this->m_device->write_to_address(DISPLAY_PASSWORD_ADDRESS, (uint8_t *)this->m_password_text, sizeof(this->m_password_text) - 1);
 }
@@ -117,7 +117,7 @@ void login_state::screen(char p_key)
     {
         this->m_keypad_buffer[this->m_digit_counter] = p_key;
         m_password_text[this->m_digit_counter] = '*';
-        logger.log(this->m_password_text);
+        logger.debug(this->m_password_text);
         m_digit_counter++;
         this->m_device->write_to_address(DISPLAY_PASSWORD_ADDRESS, (uint8_t *)this->m_password_text, sizeof(this->m_password_text) - 1); 
         return;
@@ -129,7 +129,7 @@ void login_state::screen(char p_key)
     {
         this->m_password_text[this->m_digit_counter - 1] = ' ';
         this->m_digit_counter = (this->m_digit_counter != 0) ? (this->m_digit_counter - 1) : 0;
-        logger.log(this->m_password_text);
+        logger.debug(this->m_password_text);
         this->m_device->write_to_address(DISPLAY_PASSWORD_ADDRESS, (uint8_t *)this->m_password_text, sizeof(this->m_password_text) - 1);
 
         return;
@@ -157,7 +157,7 @@ void login_state::reset()
 
 void menu_state::draw()
 {
-    logger.logln("PANTALLA MENU\r\nBienvenido\r\n1. Despacho\r\n2. Re-impresion\r\n3. Configuracion");
+    logger.debugln("PANTALLA MENU\r\nBienvenido\r\n1. Despacho\r\n2. Re-impresion\r\n3. Configuracion");
     this->m_device->change_pic();
 }
 
@@ -184,7 +184,7 @@ void menu_state::screen(char p_key)
     {
         this->m_counter = (uint8_t)(p_key - '0');
         this->m_device->request_pic_update();
-        logger.logln(this->m_counter);
+        logger.debugln(this->m_counter);
         return;
     }
 }
@@ -196,7 +196,7 @@ void menu_state::reset()
 
 void menu_cal_state::draw()
 {
-    logger.logln("PANTALLA MENU\r\nBienvenido\r\n1. Despacho\r\n2. Re-impresion\r\n3. Configuracion\r\n4. Calibracion");
+    logger.debugln("PANTALLA MENU\r\nBienvenido\r\n1. Despacho\r\n2. Re-impresion\r\n3. Configuracion\r\n4. Calibracion");
 
     this->m_device->change_pic();
 }
@@ -221,7 +221,7 @@ void menu_cal_state::screen(char p_key)
     {
         this->m_counter = (uint8_t)(p_key - '0');
         this->m_device->request_pic_update();
-        logger.logln(this->m_counter);
+        logger.debugln(this->m_counter);
         return;
     }
 }
@@ -233,7 +233,7 @@ void menu_cal_state::reset()
 
 void dispatch_menu_state::draw()
 {
-    logger.logln("PANTALLA ELECCION DE DESPACHO\r\n1. Despacho por cantidad\r\n2. Despacho libre\r\n");
+    logger.debugln("PANTALLA ELECCION DE DESPACHO\r\n1. Despacho por cantidad\r\n2. Despacho libre\r\n");
     this->m_device->change_pic();
 }
 
@@ -251,7 +251,7 @@ void dispatch_menu_state::screen(char p_key)
     {
         this->m_counter = (uint8_t)(p_key - '0');
         this->m_device->request_pic_update();
-        logger.logln(this->m_counter);
+        logger.debugln(this->m_counter);
         return;
     }
 }
@@ -263,7 +263,7 @@ void dispatch_menu_state::reset()
 
 void reprint_menu_state::draw()
 {
-    logger.logln("PANTALLA RE-IMPRESION\r\n1. Reimprimir ultimo ticket\r\n2. Reimprimir ticket de todo el dia");
+    logger.debugln("PANTALLA RE-IMPRESION\r\n1. Reimprimir ultimo ticket\r\n2. Reimprimir ticket de todo el dia");
     this->m_device->change_pic();
 }
 
@@ -289,7 +289,7 @@ void reprint_menu_state::screen(char p_key)
     {
         this->m_counter = (uint8_t)(p_key - '0');
         this->m_device->request_pic_update();
-        logger.logln(this->m_counter);
+        logger.debugln(this->m_counter);
         return;
     }
 }
@@ -301,7 +301,7 @@ void reprint_menu_state::reset()
 
 void config_menu_state::draw()
 {
-    logger.logln("PANTALLA CONFIGURACION\r\n1. Fecha y hora\r\n2. Precio\r\n3. Datos del ticket\r\n4. Brillo de la pantalla");
+    logger.debugln("PANTALLA CONFIGURACION\r\n1. Fecha y hora\r\n2. Precio\r\n3. Datos del ticket\r\n4. Brillo de la pantalla");
     this->m_device->change_pic();
 }
 
@@ -320,7 +320,7 @@ void config_menu_state::screen(char p_key)
     {
         this->m_counter = (uint8_t)(p_key - '0');
         this->m_device->request_pic_update();
-        logger.logln(this->m_counter);
+        logger.debugln(this->m_counter);
         return;
     }
 }
@@ -332,7 +332,7 @@ void config_menu_state::reset()
 
 void calibration_state::draw()
 {
-    logger.logln("PANTALLA CALIBRACION\r\n1. Flujo medido: \r\n2. Fujo patron:");
+    logger.debugln("PANTALLA CALIBRACION\r\n1. Flujo medido: \r\n2. Fujo patron:");
     this->m_device->change_pic();
 }
 
@@ -343,7 +343,7 @@ void calibration_state::screen(char p_key)
     if((isDigit(p_key) && this->m_digit_counter < this->m_max_digit_counter & this->m_counter > 1) || p_key == CLEAR)
     {
         this->m_int_standard_liters = this->m_device->write_int_value<uint32_t>(DISPLAY_STANDARD_FLOW_ADDRESS, m_int_standard_liters, p_key); 
-        logger.logln(this->m_int_standard_liters);
+        logger.debugln(this->m_int_standard_liters);
         return;
     }
     else
@@ -398,7 +398,7 @@ void calibration_state::reset()
 
 void quantity_dispatch_state::draw()
 {
-    logger.logln("PANTALLA DESPACHO POR CANTIDAD\r\n1. Cantidad en litros:\r\n2. Cantidad en precio:");
+    logger.debugln("PANTALLA DESPACHO POR CANTIDAD\r\n1. Cantidad en litros:\r\n2. Cantidad en precio:");
     this->m_device->write_int_value<uint32_t>(DISPLAY_VOLUME_DISPATCH_ADDRESS, this->m_int_volume);
     this->m_device->write_int_value<uint32_t>(DISPLAY_PRICE_DISPATCH_ADDRESS, this->m_int_cost);
     this->m_device->change_pic();
@@ -455,14 +455,14 @@ void quantity_dispatch_state::screen(char p_key)
             this->m_device->write_to_address(this->m_addresses[this->m_other_index], (uint8_t *)&this->m_dispatch_values[this->m_other_index], sizeof(uint32_t), true);
             this->m_int_volume = this->m_dispatch_values[0];
             this->m_int_cost = this->m_dispatch_values[1];
-            logger.log("INT VOLUME: ");
-            logger.logln(this->m_int_volume);
-            logger.log("FLOAT VOLUME: ");
-            logger.logln(this->m_int_volume / 100.0);
-            logger.log("INT COST: ");
-            logger.logln(this->m_int_cost);
-            logger.log("FLOAT COST: ");
-            logger.logln(this->m_int_cost / 100.0);
+            logger.debug("INT VOLUME: ");
+            logger.debugln(this->m_int_volume);
+            logger.debug("FLOAT VOLUME: ");
+            logger.debugln(this->m_int_volume / 100.0);
+            logger.debug("INT COST: ");
+            logger.debugln(this->m_int_cost);
+            logger.debug("FLOAT COST: ");
+            logger.debugln(this->m_int_cost / 100.0);
 
             if(!(p_key == '0' && this->m_dispatch_values[this->m_current_index] == 0))
                 this->m_digit_counter[this->m_current_index] = (p_key == CLEAR && this->m_digit_counter[this->m_current_index] > 0) ? this->m_digit_counter[this->m_current_index]  - 1 : this->m_digit_counter[this->m_current_index]  + 1;
@@ -485,7 +485,7 @@ void quantity_dispatch_state::reset()
 
 void dispatch_state::draw()
 {
-    logger.logln("PANTALLA DESPACHO");
+    logger.debugln("PANTALLA DESPACHO");
     this->m_device->change_pic();
     m_price = this->m_device->get_price();
     uint32_t zero = 0;
@@ -672,7 +672,7 @@ void dispatch_state::reset()
 
 void date_and_hour_state::draw()
 {
-    logger.logln("PANTALLA FECHA Y HORA");
+    logger.debugln("PANTALLA FECHA Y HORA");
     this->m_device->change_pic();
 
     for(int i = 0; i < 5; i++)
@@ -700,7 +700,7 @@ void date_and_hour_state::screen(char p_key)
     if((isDigit(p_key) && this->m_digit_counter < this->m_max_digit_counter) || p_key == CLEAR)
     {
         this->m_rtc_info[this->m_counter] = this->m_device->write_int_value<uint16_t>(this->m_rtc_info_addresses[this->m_counter],  (uint16_t)this->m_rtc_info[this->m_counter], p_key);
-        logger.logln(this->m_rtc_info[this->m_counter]);
+        logger.debugln(this->m_rtc_info[this->m_counter]);
 
         if(!(p_key == '0' && this->m_rtc_info[this->m_counter] == 0))
         {
@@ -721,14 +721,14 @@ void date_and_hour_state::reset()
 
 void price_state::draw()
 {
-    logger.logln("PANTALLA PRECIO");
+    logger.debugln("PANTALLA PRECIO");
     m_price = this->m_device->get_price();
     this->m_device->change_pic();
     this->m_int_price = (uint16_t)(this->m_price * 100);
     this->m_int_new_price = 0;
     this->m_device->write_to_address(DISPLAY_CURRENT_PRICE_ADDRESS, (uint8_t *)&this->m_int_price, sizeof(uint16_t), true);
     this->m_device->write_to_address(DISPLAY_NEW_PRICE_ADDRESS, (uint8_t *)&this->m_int_new_price, sizeof(uint16_t), true);
-    logger.logln(this->m_price);
+    logger.debugln(this->m_price);
 }
 
 void price_state::screen(char p_key)
@@ -763,7 +763,7 @@ void price_state::screen(char p_key)
             this->m_digit_counter = (this->m_digit_counter > this->m_max_digit_counter) ? this->m_max_digit_counter : this->m_digit_counter;
         }
 
-        logger.logln(this->m_int_new_price);
+        logger.debugln(this->m_int_new_price);
     }
 }
 
@@ -777,7 +777,7 @@ void price_state::reset()
 
 void ticket_info_state::draw()
 {
-    logger.logln("PANTALLA DATOS DEL TICKET");
+    logger.debugln("PANTALLA DATOS DEL TICKET");
     this->m_device->change_pic();
     this->m_state_callback_function(nullptr, 1);
 }
@@ -805,12 +805,12 @@ void ticket_info_state::reset()
 
 void brightness_state::draw()
 {
-    logger.logln("PANTALLA BRILLO");
+    logger.debugln("PANTALLA BRILLO");
     this->m_device->change_pic();
     this->m_brightness = this->m_device->get_brightness();
     this->m_bar_value = this->m_brightness;
-    logger.logln(this->m_bar_value);
-    logger.logln(this->m_brightness);
+    logger.debugln(this->m_bar_value);
+    logger.debugln(this->m_brightness);
     this->m_device->write_to_address(DISPLAY_BRIGHTNESS_BAR_ADDRESS, (uint8_t *)&this->m_bar_value, sizeof(uint16_t), true);
 }
 
@@ -837,7 +837,7 @@ void brightness_state::screen(char p_key)
             this->m_bar_value = (this->m_bar_value >= 100) ? 100 : this->m_bar_value;
             this->m_device->write_to_address(DISPLAY_BRIGHTNESS_BAR_ADDRESS, (uint8_t *)&this->m_bar_value, sizeof(uint16_t), true);
             this->m_device->set_brightness(this->m_bar_value);
-            logger.logln(this->m_bar_value);
+            logger.debugln(this->m_bar_value);
 
             return;
         }

@@ -687,6 +687,20 @@ void General_Task(void *pvParameters)
   }
 }
 
+/// Una reconexión de Socket.IO pidió descargar las listas: los avisos de cambios de usuarios
+/// o de precio que el servidor emitió mientras no había conexión se perdieron. Lo levanta
+/// Websocket_Task y lo atiende HTTP_Task.
+static volatile bool platform_sync_requested = false;
+
+/**
+ * @brief Se llama al restablecer la conexión con Socket.IO. Corre en Websocket_Task con
+ *        http_mutex tomado, así que solo deja la descarga pedida para HTTP_Task.
+ */
+static void on_socketio_reconnected()
+{
+  platform_sync_requested = true;
+}
+
 /**
  * @brief Tarea encargada de la comunicación HTTP con el servidor.
  * @param pvParameters Parámetros de la tarea (no utilizados).
@@ -702,7 +716,7 @@ void HTTP_Task(void *pvParameters)
   strncat(data_endpoint, device_name, space_left);
   data_endpoint[sizeof(data_endpoint) - 1] = '\0';
 
-  logger.logln(data_endpoint);
+  logger.debugln(data_endpoint);
 
   http_client = (Ethernet_HTTP *)build_http_client(&http_builder);
 
@@ -713,6 +727,7 @@ void HTTP_Task(void *pvParameters)
   unsigned long last_sync_millis = 0;
   unsigned long sync_interval = 0;
   bool sync_attempted = false;
+  bool sync_failed = false;
 
   while(true)
   {
@@ -733,17 +748,33 @@ void HTTP_Task(void *pvParameters)
 
     // Descarga de cliente, usuarios, tags y precio: en cuanto hay red después de
     // encender y luego cada 24 h. Si falla se reintenta cada 5 min; mientras
-    // tanto se usan las listas guardadas en la SD.
-    if(ethernet_begin && (!sync_attempted || current_millis - last_sync_millis >= sync_interval))
+    // tanto se usan las listas guardadas en la SD. También al reconectar Socket.IO,
+    // pero no antes de PLATFORM_SYNC_MIN_GAP_MS desde la anterior: se pospone, no se pierde.
+    bool reconnect_sync = platform_sync_requested && current_millis - last_sync_millis >= PLATFORM_SYNC_MIN_GAP_MS;
+
+    if(ethernet_begin && (!sync_attempted || reconnect_sync || current_millis - last_sync_millis >= sync_interval))
     {
+      if(reconnect_sync)
+        logger.logln("Se descargan las listas de la plataforma tras reconectar Socket.IO.");
+
+      // Antes de descargar: si llega otra reconexión durante la descarga, se vuelve a pedir.
+      platform_sync_requested = false;
+
       bool synced = sync_platform_data();
 
       sync_interval = synced ? PLATFORM_SYNC_INTERVAL_MS : PLATFORM_SYNC_RETRY_MS;
       last_sync_millis = millis();
       sync_attempted = true;
 
-      logger.logln(synced ? "Datos de la plataforma actualizados; la siguiente descarga es en 24 h."
-                          : "No se pudieron descargar los datos de la plataforma; se reintenta en 5 min.");
+      // El fallo solo se registra la primera vez de la racha, no en cada reintento.
+      if(synced)
+        logger.logln("Datos de la plataforma actualizados; la siguiente descarga es en 24 h.");
+      else if(!sync_failed)
+        logger.logln("No se pudieron descargar los datos de la plataforma; se reintenta cada 5 min.");
+      else
+        logger.debugln("No se pudieron descargar los datos de la plataforma.");
+
+      sync_failed = !synced;
     }
 
     if(current_millis - last_millis > 60000)
@@ -785,6 +816,7 @@ void Websocket_Task(void *pvParameters)
   websocket_client->set_event(user_update_event, update_user);
   websocket_client->set_event(product_update_event, update_product);
   websocket_client->set_event(firmware_update_event, update_firmware);
+  websocket_client->set_reconnect_callback(on_socketio_reconnected);
   websocket_client->set_identifer(websocket_identifier, device_name);
   int device_namespace_index = websocket_client->set_namespace(socket_io_device_namespace);
   
@@ -957,6 +989,9 @@ void setup()
   logger.log("Particion en uso: ");
   logger.logln(running != nullptr ? running->label : "?");
 
+  // Un solo renglón con todas las direcciones que responden.
+  logger.log("Dispositivos I2C:");
+
   for(int i = 0; i < 128; i++)
   {
     // Las apps del display y de la impresora procesan una escritura vacía como un comando
@@ -968,14 +1003,16 @@ void setup()
 
     if(Wire.endTransmission() == 0)
     {
-      logger.log("0x");
+      logger.log(" 0x");
 
       if(i < 0x10)
         logger.log("0");
-      
-      logger.logln(i, HEX);
+
+      logger.log(i, HEX);
     }
   }
+
+  logger.logln();
 
   config_ethernet();
 
@@ -1042,6 +1079,7 @@ void check_password(uint8_t *p_password, int args)
       
       trigger_event(LOG_IN, true);
 
+      logger.log("Inicio de sesion: ");
       logger.logln(active_user);
     }
   }
@@ -1081,8 +1119,8 @@ void print_ticket(uint8_t *p_data, int args)
 
 void execute_print_ticket()
 {
-  logger.log("printer_connected: ");
-  logger.logln(printer_connected);
+  logger.debug("printer_connected: ");
+  logger.debugln(printer_connected);
 
   if(printer_connected == 0)
   {
@@ -1110,7 +1148,7 @@ void execute_print_ticket()
 
       ticket_struct ticket;
       uint8_t rtc_array[7];
-      logger.logln(last_dispatch);
+      logger.debugln(last_dispatch);
 
       build_ticket(&ticket, last_dispatch, rtc_array);
 
@@ -1126,7 +1164,7 @@ void execute_print_ticket()
   else if(args == 2)
   {
     int lines = get_number_of_lines(DISPATCHES_PATH);
-    logger.logln(lines);
+    logger.debugln(lines);
 
     if(lines < 0)
     {
@@ -1461,9 +1499,9 @@ void show_ticket_info(uint8_t *p_business_info, int args)
     for(int i = 0; i < 6; i++)
     {
       display_status = screen->write_to_address(display_ticket_info_addresses[i], (uint8_t *)display_ticket_info[i], strlen(display_ticket_info[i]));
-      logger.log(i + 1);
-      logger.log(". ");
-      logger.logln(display_ticket_info[i]);
+      logger.debug(i + 1);
+      logger.debug(". ");
+      logger.debugln(display_ticket_info[i]);
       vTaskDelay(20 / portTICK_PERIOD_MS);
     }
   }
@@ -1521,6 +1559,7 @@ void get_mac_address(const char *p_mac_address)
 
   *ptr = '\0';
 
+  logger.log("MAC: ");
   logger.logln(mac_address);
 }
 
@@ -1818,20 +1857,35 @@ void config_parameters()
       logger.logln("Offset invalido en /Parametros.txt; se usa el valor por defecto.");
   }
 
+  // Servidor, MAC de la impresora y datos del negocio del ticket: solo en depuración.
   for(int i = 0; i < 10; i++)
-    logger.logln(parameters[i]);
+    logger.debugln(parameters[i]);
 
-  logger.logln(number_of_users);
-  logger.logln(ticket_number);
-  logger.logln(max_fuel_level);
-  logger.logln(price);
+  // En la SD, un solo renglón con lo que sirve para diagnosticar en campo.
+  logger.log("Parametros: servidor ");
+  logger.log(server);
+  logger.log(":");
+  logger.log(port);
+  logger.log(", cliente ");
+  logger.log(client_id);
+  logger.log(", producto ");
+  logger.log(product_id);
+  logger.log(", precio ");
+  logger.log(price);
+  logger.log(", factor K ");
+  logger.log(k_factor, 6);
+  logger.log(", offset ");
+  logger.log(offset, 6);
+  logger.log(", nivel max ");
+  logger.log(max_fuel_level);
+  logger.log(", LLS ascii ");
+  logger.log(lls_ascii);
+  logger.log(", usuarios ");
+  logger.log(number_of_users);
+  logger.log(", folio ");
+  logger.log(ticket_number);
+  logger.log(", brillo ");
   logger.logln(brightness);
-  logger.logln(k_factor, 6);
-  logger.logln(lls_ascii);
-  logger.logln(port);
-  logger.logln(offset, 6);
-  logger.logln(client_id);
-  logger.logln(product_id);
 }
 
 /**
@@ -1922,11 +1976,12 @@ void config_users()
     strncpy(latest_users[i].password, passwords[i], USER_PSWD_SIZE);
     strncpy(latest_users[i].name, user_names[i], USER_NAME_SIZE);
 
-    logger.log(user_ids[i]);
-    logger.log(": ");
-    logger.log(passwords[i]);
-    logger.log(", ");
-    logger.logln(user_names[i]);
+    // Lleva la clave: solo en depuración, nunca en la SD.
+    logger.debug(user_ids[i]);
+    logger.debug(": ");
+    logger.debug(passwords[i]);
+    logger.debug(", ");
+    logger.debugln(user_names[i]);
   }
 
   // El número de usuarios es el de las líneas leídas, aunque /Parametros.txt diga otro.
@@ -2003,7 +2058,7 @@ void read_api_key()
   if(read_file(API_KEY_PATH, sd_line, 1, '\n'))
   {
     strncpy(api_key, sd_line[0], sizeof(api_key));
-    logger.logln(api_key);
+    logger.debugln(api_key);  // Es una credencial: nunca en la SD.
   }
 }
 
@@ -2058,8 +2113,15 @@ void config_github()
     {
       strncpy((char *)github_parameters[i], (const char *)gh_parameters[i], github_param_sizes[i] - 1);
       github_parameters[i][github_param_sizes[i] - 1] = '\0';
-      logger.logln(github_parameters[i]);
+      logger.debugln(github_parameters[i]);  // El primero es el token de GitHub: nunca en la SD.
     }
+
+    logger.log("Versiones de firmware: ESP32 ");
+    logger.log(current_esp32_fw_v);
+    logger.log(", display ");
+    logger.log(current_display_fw_v);
+    logger.log(", impresora ");
+    logger.logln(current_printer_fw_v);
   }
 }
 
@@ -2526,9 +2588,25 @@ void check_printer()
 {
   unsigned long current_millis = millis();
   static unsigned long last_millis = 0;
+  /// Ya se registró la desconexión: los reintentos cada 30 s no se repiten en la SD.
+  static bool disconnection_logged = false;
+
+  if(printer_connected == 1 && disconnection_logged)
+  {
+    logger.logln("Impresora conectada.");
+    disconnection_logged = false;
+  }
+
   if(printer_connected == 0 && current_millis - last_millis > 30000 && !dispatching && !calibrating)
   {
-    logger.logln("Conectando a impresora...");
+    if(!disconnection_logged)
+    {
+      logger.logln("Impresora no conectada; se reintenta cada 30 s.");
+      disconnection_logged = true;
+    }
+    else
+      logger.debugln("Conectando a impresora...");
+
     printer->reset_printer();
     last_millis = current_millis;
   }
@@ -2543,6 +2621,7 @@ void get_lls_data()
   static unsigned long last_millis = 0;
   static unsigned long interval = 0;      // 0: la primera lectura se hace de inmediato.
   static bool sensor_connected = true;    // Evita repetir FUEL_SENSOR_DISCONNECTED en cada reintento.
+  static status last_error = LLS::NO_DEVICE_ERROR;
 
   unsigned long current_millis = millis();
 
@@ -2558,23 +2637,40 @@ void get_lls_data()
     lls_fuel_level = lls_device->get_fuel_level(0x01);
     lls_temp = lls_device->get_temperature(0x01);
 
-    logger.log("Fuel: ");
-    logger.logln(lls_fuel_level);
+    if(!sensor_connected)
+      logger.logln("Sensor LLS respondio de nuevo.");
 
-    logger.log("Temp: ");
-    logger.logln(lls_temp);
+    // El nivel y la temperatura ya viajan en el evento FUEL_LEVEL.
+    logger.debug("Fuel: ");
+    logger.debugln(lls_fuel_level);
+
+    logger.debug("Temp: ");
+    logger.debugln(lls_temp);
 
     trigger_event(FUEL_LEVEL);
 
     sensor_connected = true;
+    last_error = LLS::NO_DEVICE_ERROR;
     interval = LLS_READ_INTERVAL_MS;
   }
   else
   {
     // Cualquier error (timeout, CRC, encabezado, dirección o nivel fuera de rango)
-    // se trata como sensor no disponible y se reintenta en poco tiempo.
-    logger.log("Error LLS: ");
-    logger.logln(l_status);
+    // se trata como sensor no disponible y se reintenta en poco tiempo. En la SD solo
+    // queda el primer error y cada cambio de código, no cada reintento de 30 s.
+    if(l_status != last_error)
+    {
+      logger.log("Error LLS: ");
+      logger.log(l_status);
+      logger.logln(" (se reintenta cada 30 s)");
+    }
+    else
+    {
+      logger.debug("Error LLS: ");
+      logger.debugln(l_status);
+    }
+
+    last_error = l_status;
 
     lls_fuel_level = 0;
     lls_temp = 0;
@@ -2788,8 +2884,9 @@ bool send_data(json_event_struct *p_json)
   
   json[sizeof(json) - 1] = '\0';
 
-  logger.logln(json);
-  
+  // Si no se envía queda en /Eventos.txt; si se envía, lo tiene la plataforma.
+  logger.debugln(json);
+
   xSemaphoreTake(http_mutex, portMAX_DELAY);
   bool send = send_data(json);
   xSemaphoreGive(http_mutex);
@@ -2846,7 +2943,7 @@ bool update_data(json_update_struct *p_json)
   snprintf(json, sizeof(json) - 1, "{\"nombre\":\"%s\",\"precio\":%s}", p_json->product, p_json->price);
 
   json[sizeof(json) - 1] = '\0';
-  logger.logln(json);
+  logger.debugln(json);
 
   char endpoint[32];
   snprintf(endpoint, sizeof(endpoint), "%s/%u", product_endpoint, p_json->id);
@@ -2957,7 +3054,7 @@ void trigger_event(json_event p_event, bool p_use_password, float p_quantity, bo
     strncpy(json_struct.quantity_dispatched, null_text, sizeof(json_struct.quantity_dispatched));
 
   if(xQueueSend(Event_Queue, (void *)&json_struct, pdMS_TO_TICKS(10)) == pdTRUE)
-    logger.logln("Enviando evento...");
+    logger.debugln("Enviando evento...");
 }
 
 /**
@@ -3067,14 +3164,21 @@ void send_last_events()
   if(!ethernet_begin)
     return;
 
+  /// El último envío de pendientes falló: con el servidor caído no se repite cada minuto.
+  static bool send_failed = false;
+
   size_t n_events = 0;
   char events[10][MAX_EVENT_JSON_LENGTH] = { 0 };
 
   int length = get_events(events, &n_events);
 
-  if(length == 0)
+  if(length <= 0)
   {
-    logger.logln("No hay eventos en la cola.");
+    if(length < 0)
+      logger.logln("No se pudieron leer los eventos guardados.");
+    else
+      logger.debugln("No hay eventos en la cola.");
+
     http_client->flush_headers();
     return;
   }
@@ -3089,14 +3193,14 @@ void send_last_events()
       logger.logln("Evento guardado con valores vacios que no se pudieron reparar.");
   }
 
-  logger.logln("Enviando ultimos eventos...");
+  logger.debugln("Enviando ultimos eventos...");
 
   if(length > 0)
   {
     char json[MAX_EVENT_JSON_LENGTH*10];
     memset(json, 0x00, sizeof(json));
 
-    logger.logln(n_events);
+    logger.debugln(n_events);
     size_t used = 0;
 
     for(int i = 0; i < n_events; i++)
@@ -3115,9 +3219,9 @@ void send_last_events()
     }
 
     json[sizeof(json) - 1] = '\0';
-    
-    logger.logln(json);
-    
+
+    logger.debugln(json);
+
     xSemaphoreTake(http_mutex, portMAX_DELAY);
     bool state = send_data(json);
     xSemaphoreGive(http_mutex);
@@ -3125,11 +3229,20 @@ void send_last_events()
 
     if(!state)
     {
-      logger.log("No se pudieron enviar los ultimos "); 
-      logger.log(n_events);
-      logger.logln(" eventos.");
+      if(!send_failed)
+      {
+        logger.log("No se pudieron enviar los ultimos ");
+        logger.log(n_events);
+        logger.logln(" eventos; se reintenta cada minuto.");
+      }
+      else
+        logger.debugln("No se pudieron enviar los eventos guardados.");
+
+      send_failed = true;
       return;
     }
+
+    send_failed = false;
 
     logger.log("Ultimos ");
     logger.log(n_events);
@@ -3185,7 +3298,7 @@ void events()
  */
 bool sync_platform_data()
 {
-  logger.logln("Descargando datos de la plataforma...");
+  logger.debugln("Descargando datos de la plataforma...");
 
   sync_device();
 
@@ -3202,8 +3315,8 @@ const char *platform_get(const char *p_endpoint)
   if(!ethernet_begin)
     return nullptr;
 
-  logger.log("GET ");
-  logger.logln(p_endpoint);
+  logger.debug("GET ");
+  logger.debugln(p_endpoint);
 
   xSemaphoreTake(http_mutex, portMAX_DELAY);
   http_client->set_server(server);
@@ -3355,13 +3468,13 @@ bool sync_users()
 
     if(reason)
     {
-      logger.log("Usuario sin acceso: ");
-      logger.log(user.name);
-      logger.log(" ");
-      logger.log(user.last_name);
-      logger.log(" (");
-      logger.log(reason);
-      logger.logln(")");
+      logger.debug("Usuario sin acceso: ");
+      logger.debug(user.name);
+      logger.debug(" ");
+      logger.debug(user.last_name);
+      logger.debug(" (");
+      logger.debug(reason);
+      logger.debugln(")");
       continue;
     }
 
@@ -3472,8 +3585,8 @@ bool sync_tags()
 
     downloaded[count++] = record;
 
-    logger.log("Tag registrado: ");
-    logger.logln(record.identifier);
+    logger.debug("Tag registrado: ");
+    logger.debugln(record.identifier);
   }
 
   xSemaphoreTake(lists_mutex, portMAX_DELAY);
@@ -3812,7 +3925,7 @@ void check_dispatches(bool init)
     // get_last_dispatch() regresa 1 solo si lo leyó; con -1/-2 se guardaba basura.
     if(get_last_dispatch(last_dispatch) == 1)
     {
-      logger.logln(last_dispatch);
+      logger.debugln(last_dispatch);
       save_dispatch(last_dispatch, true);
     }
     else
@@ -3831,7 +3944,7 @@ void check_dispatches(bool init)
     return;
   
   int lines = get_number_of_lines(DISPATCHES_PATH);
-  logger.logln(lines);
+  logger.debugln(lines);
 
   if(lines <= 0)
   {
@@ -3848,7 +3961,7 @@ void check_dispatches(bool init)
     return;
   }
 
-  logger.logln("Borrando los despachos que no son del día...");
+  logger.debugln("Borrando los despachos que no son del día...");
 
   if(!get_dispatches(dispatches, lines))
     return;
@@ -3865,7 +3978,7 @@ void check_dispatches(bool init)
   {
     if(strncmp(dispatches[i], date, date_length) != 0)
     {
-      logger.logln(dispatches[i]);
+      logger.debugln(dispatches[i]);
       counter++;
     }
   }
@@ -4078,27 +4191,40 @@ void config_ethernet()
  */
 bool check_ethernet_link()
 {
+  // Con cable pero sin DHCP, las dos tareas reintentan cada minuto: en la SD solo
+  // queda el primer intento fallido, hasta que se asigna IP o se desconecta el cable.
+  static bool dhcp_failure_logged = false;
+
   if(Ethernet.linkStatus() != LinkON)
   {
     if(ethernet_begin)
       logger.logln("Cable Ethernet desconectado.");
 
     ethernet_begin = false;
+    dhcp_failure_logged = false;
     return false;
   }
 
   if(!ethernet_begin)
   {
-    logger.logln("Cable Ethernet detectado. Configurando DHCP...");
+    if(!dhcp_failure_logged)
+      logger.logln("Cable Ethernet detectado. Configurando DHCP...");
+    else
+      logger.debugln("Reintentando DHCP...");
+
     ethernet_begin = Ethernet.begin(ethernet_mac_address) != 0;
 
     if(ethernet_begin)
     {
       logger.log("IP asignada: ");
       logger.logln(Ethernet.localIP());
+      dhcp_failure_logged = false;
     }
-    else
-      logger.logln("No se pudo configurar DHCP.");
+    else if(!dhcp_failure_logged)
+    {
+      logger.logln("No se pudo configurar DHCP; se reintenta cada minuto.");
+      dhcp_failure_logged = true;
+    }
   }
 
   return ethernet_begin;
@@ -4163,6 +4289,7 @@ void update_user(const char *p_payload)
   get_json_key_value(keys, values, "nombre", first_name, 4);
   get_json_key_value(keys, values, "apellido", last_name, 4);
   int user_id = atoi(str_user_id);
+  logger.log("Actualizacion de usuario desde la plataforma: ");
   logger.logln(str_user_id);
 
   if(user_id == 0 || password[0] == '\0' || strlen(password) > USER_PSWD_SIZE - 1)
@@ -4439,6 +4566,7 @@ void update_firmware(const char *p_payload)
   get_json_key_value(&keys, &values, "version", version, 1);
   trim_trailing_whitespace(version);
 
+  logger.log("Actualizacion de firmware solicitada: ");
   logger.logln(version);
 
   // La versión se guarda con el tamaño de current_esp32_fw_v: una más larga quedaría
@@ -4458,7 +4586,7 @@ void update_firmware(const char *p_payload)
     return;
   }
 
-  logger.logln(endpoint);
+  logger.debugln(endpoint);
 
   char auth_value[sizeof("Bearer ") + GITHUB_TOKEN_SIZE] = "";
   bool ready = begin_github_request(auth_value, sizeof(auth_value));
@@ -4512,7 +4640,7 @@ void read_core_dump()
 
   if(err != ESP_OK || size == 0)
   {
-    logger.logln("No hay core dump en la memoria flash.");
+    logger.debugln("No hay core dump en la memoria flash.");
 
     return;
   }
@@ -4582,7 +4710,7 @@ void check_firmware_updates()
   char endpoint[128] = "";
 
   snprintf(endpoint, sizeof(endpoint), "%s/versions.txt", branches_endpoint);
-  logger.logln(endpoint);
+  logger.debugln(endpoint);
 
   xSemaphoreTake(http_mutex, portMAX_DELAY);
 
@@ -4604,6 +4732,7 @@ void check_firmware_updates()
     return;
   }
 
+  logger.log("versions.txt: ");
   logger.logln((const char *)buffer);
 
   char versions[3][STRING_BUFFER] = { 0 };
@@ -4622,7 +4751,7 @@ void check_firmware_updates()
     // versions.txt puede terminar en salto de línea (\n o \r\n): sin recortarlo, la
     // versión nunca coincide y la URL de la impresora queda con un salto de línea.
     trim_trailing_whitespace(versions[i]);
-    logger.logln(versions[i]);
+    logger.debugln(versions[i]);
 
     if(versions[i][0] == '\0' || strlen(versions[i]) >= github_param_sizes[i + 1])
     {
@@ -4630,9 +4759,10 @@ void check_firmware_updates()
       continue;
     }
 
+    // versions.txt ya quedó en el log: lo que está al día no se repite.
     if(strcmp((const char *)versions[i], github_parameters[i + 1]) == 0)
     {
-      logger.logln("No hay nueva version de firmware disponible.");
+      logger.debugln("No hay nueva version de firmware disponible.");
       continue;
     }
 
@@ -4646,9 +4776,10 @@ void check_firmware_updates()
       continue;
     }
 
-    logger.logln("Se encontró nueva version de firmware.");
+    logger.log("Se encontró nueva version de firmware: ");
+    logger.logln(versions[i]);
     logger.logln("Descargando...");
-    logger.logln(endpoint);
+    logger.debugln(endpoint);
 
     if(!download_firmware_to(firmware_paths[i], endpoint))
       continue;
@@ -4756,6 +4887,8 @@ static void check_atmega_recovery()
   static unsigned long last_check = 0;
   static bool checked = false;
   static uint8_t recoveries = 0;
+  /// Ya se registró que no hay binario: la revisión de cada minuto no lo repite.
+  static bool missing_binary_logged[3] = { false, false, false };
 
   if(recoveries >= ATMEGA_RECOVERY_LIMIT || (checked && millis() - last_check < 60000))
     return;
@@ -4771,14 +4904,20 @@ static void check_atmega_recovery()
     if(trigger_fw_update[component] || device->bootloader_status() != BOOTLOADER_NO_APP_STATUS)
       continue;
 
-    logger.log(name);
-
     if(!SD.exists(firmware_paths[component]))
     {
-      logger.logln(" sin app y sin binario en la SD.");
+      if(!missing_binary_logged[component])
+      {
+        logger.log(name);
+        logger.logln(" sin app y sin binario en la SD.");
+        missing_binary_logged[component] = true;
+      }
+
       continue;
     }
 
+    missing_binary_logged[component] = false;
+    logger.log(name);
     logger.logln(" sin app: se recupera con el binario de la SD.");
     trigger_fw_update[component] = true;
     recoveries++;

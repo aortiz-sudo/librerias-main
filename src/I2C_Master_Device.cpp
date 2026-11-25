@@ -68,12 +68,28 @@ size_t I2C_Master_Device::write_data(uint8_t *p_data, size_t p_data_legth)
         return 0;
     }
 
-    if(transmission_status != 0)
+    // Solo el primer error de una racha y la recuperación: con un ATmega que no responde,
+    // cada escritura repetía el mismo aviso en la SD.
+    if(transmission_status != this->m_last_i2c_error)
     {
         logger.log(this->m_address, HEX);
-        logger.log(" I2C ERROR: ");
-        logger.logln(transmission_status);
+
+        if(transmission_status != 0)
+        {
+            logger.log(" I2C ERROR: ");
+            logger.logln(transmission_status);
+        }
+        else
+            logger.logln(" I2C: responde de nuevo");
     }
+    else if(transmission_status != 0)
+    {
+        logger.debug(this->m_address, HEX);
+        logger.debug(" I2C ERROR: ");
+        logger.debugln(transmission_status);
+    }
+
+    this->m_last_i2c_error = transmission_status;
 
     if(transmission_status == 1)
     {
@@ -214,10 +230,10 @@ status I2C_Master_Device::burn_firmware(File *p_file, size_t p_file_size)
                 page_data[i] = 0xFF;
         }
 
-        logger.log("Escribiendo pagina ");
-        logger.log(current_page);
-        logger.log(" de ");
-        logger.logln(total_pages);
+        logger.debug("Escribiendo pagina ");
+        logger.debug(current_page);
+        logger.debug(" de ");
+        logger.debugln(total_pages);
 
         // Enviar página directamente por I2C (131 bytes, no cabe en send_command)
         if(write_data(flash_buffer, sizeof(flash_buffer)) == 0)

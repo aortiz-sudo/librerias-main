@@ -538,6 +538,13 @@ extern "C"
  */
 #define PLATFORM_SYNC_RETRY_MS    300000UL
 /**
+ * \def   PLATFORM_SYNC_MIN_GAP_MS
+ * \brief Tiempo mínimo entre la última descarga y la que pide una reconexión de Socket.IO
+ *        (5 minutos). Si llega antes se pospone, no se descarta: con una conexión
+ *        intermitente las listas no se descargan en cada reconexión.
+ */
+#define PLATFORM_SYNC_MIN_GAP_MS  300000UL
+/**
  * \def   PLATFORM_BUFFER_SIZE
  * \brief Tamaño del buffer para las respuestas de la plataforma. Cada usuario
  *        ocupa unos 230 bytes y cada tag unos 190, así que caben los

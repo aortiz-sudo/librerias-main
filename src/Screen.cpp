@@ -23,8 +23,8 @@ status Screen::set_brightness(uint8_t p_brightness, bool p_save)
     if(p_save)
         this->m_brightness = p_brightness;
 
-    logger.log("Brillo: ");
-    logger.logln(p_brightness);
+    logger.debug("Brillo: ");
+    logger.debugln(p_brightness);
 
     uint8_t data[] = { 0x00, p_brightness };
 

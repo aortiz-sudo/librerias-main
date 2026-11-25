@@ -180,7 +180,7 @@ bool save_event(const char *p_event)
   if(save)
   {
     append_to_file(EVENTS_PATH, "\r\n");
-    logger.logln("Evento guardado con exito.");
+    logger.debugln("Evento guardado con exito.");
   }
   else
     logger.logln("No se pudo guardar el evento.");
@@ -190,6 +190,11 @@ bool save_event(const char *p_event)
 
 int get_events(char p_event[][256], size_t *n)
 {
+  // El archivo solo existe desde que un evento no se pudo enviar. Sin esto, cada minuto
+  // send_last_events() registraba "No se pudo abrir el archivo".
+  if(!SD.exists(EVENTS_PATH))
+    return 0;
+
   int lines = get_number_of_lines(EVENTS_PATH);
 
   if(lines < 1)
@@ -237,8 +242,6 @@ int get_events(char p_event[][256], size_t *n)
     total_length += length;
   }
 
-  logger.logln(" ");
-
   file.close();
 
   return total_length;
@@ -247,7 +250,7 @@ int get_events(char p_event[][256], size_t *n)
 bool erase_events(size_t n)
 {
   int total_lines = get_number_of_lines(EVENTS_PATH);
-  logger.logln(total_lines);
+  logger.debugln(total_lines);
 
   if(total_lines <= 10)
     return write_to_file(EVENTS_PATH, "");

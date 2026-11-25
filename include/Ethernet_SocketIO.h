@@ -20,6 +20,20 @@
  * \brief   Número máximo de namespaces a los que se puede conectar el cliente Socket.IO.
  */
 #define MAX_NUMBER_OF_NAMPESPACES 4
+
+/**
+ * \def     SOCKETIO_RECONNECT_MIN_MS
+ * \brief   Espera después del primer intento de reconexión fallido. Se duplica en cada
+ *          fallo seguido hasta SOCKETIO_RECONNECT_MAX_MS.
+ */
+#define SOCKETIO_RECONNECT_MIN_MS 5000UL
+
+/**
+ * \def     SOCKETIO_RECONNECT_MAX_MS
+ * \brief   Espera máxima entre intentos de reconexión con el servidor Socket.IO.
+ */
+#define SOCKETIO_RECONNECT_MAX_MS 60000UL
+
 /**
  * \enum    engine_io_msg_t
  * \brief   Tipos de mensajes de Engine.IO.
@@ -57,6 +71,13 @@ typedef enum : char
  * \brief   Definición de tipo para funciones de callback de eventos.
  */
 typedef void(*event_callback)(const char *);
+
+/**
+ * \typedef reconnect_callback
+ * \brief   Función que se llama al restablecer la conexión con el servidor. Corre dentro de
+ *          handle_message(), con http_mutex tomado: no debe hacer peticiones HTTP.
+ */
+typedef void(*reconnect_callback)();
 
 /**
  * \class Ethernet_SocketIO
@@ -125,6 +146,16 @@ class Ethernet_SocketIO : public Ethernet_WebSocket
         void set_event(const char *p_event, event_callback p_callback_function);
 
         /**
+         * \brief                       Función a llamar cada vez que se restablece la conexión
+         *                              (no en la primera conexión al arrancar).
+         * \param p_callback_function   Función callback (ver reconnect_callback).
+         */
+        inline void set_reconnect_callback(reconnect_callback p_callback_function)
+        {
+            this->m_reconnect_callback = p_callback_function;
+        }
+
+        /**
          * \brief               Envía un evento al servidor dentro del namespace indicado.
          * \param p_namespace    Namespace por el que se enviará el evento.
          * \param p_event_name   Nombre del evento a emitir.
@@ -185,8 +216,34 @@ class Ethernet_SocketIO : public Ethernet_WebSocket
         unsigned long m_ping_interval = 0;                  ///< Intervalo entre pings.
         unsigned long m_last_ping = 0;                      ///< Marca de tiempo del último ping.
         uint8_t m_namespace_counter = 0;                    ///< Contador de namespaces registrados.
+        bool m_connected = true;                            ///< Último estado registrado en el log (para registrar solo los cambios).
+        bool m_reconnecting = false;                        ///< Se perdió la conexión y se está reintentando.
+        unsigned long m_reconnect_delay = 0;                ///< Espera antes del siguiente intento (0: inmediato).
+        unsigned long m_last_reconnect_millis = 0;          ///< Fin del último intento de reconexión fallido.
+        reconnect_callback m_reconnect_callback = nullptr;  ///< Se llama al restablecer la conexión.
 
     private:
+        /**
+         * \brief   Marca la conexión como perdida y prepara la reconexión: el primer intento
+         *          es inmediato y los siguientes esperan cada vez más (ver reconnect()).
+         */
+        void begin_reconnect();
+
+        /**
+         * \brief   Intenta reconectar si ya pasó la espera desde el último intento fallido.
+         *          Si falla, la espera se duplica de SOCKETIO_RECONNECT_MIN_MS hasta
+         *          SOCKETIO_RECONNECT_MAX_MS.
+         */
+        void reconnect();
+
+        /**
+         * \brief               Registra en el log un cambio en la conexión con el servidor; si
+         *                      el estado no cambió, el aviso va al nivel de detalle (debug).
+         * \param p_connected   Estado nuevo de la conexión.
+         * \param p_message     Aviso a registrar.
+         */
+        void report_connection(bool p_connected, const char *p_message);
+
         /**
          * \brief   Realiza el handshake inicial con el servidor.
          * \returns true si el handshake fue exitoso, false en caso contrario.

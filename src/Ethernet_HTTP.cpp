@@ -3,6 +3,24 @@
 /// Tiempo máximo sin recibir datos mientras se lee el cuerpo de una respuesta.
 static constexpr unsigned long HTTP_BODY_TIMEOUT_MS = 5000;
 
+void Ethernet_HTTP::log_http_code(int p_code)
+{
+    // Solo cuando cambia: un 200 tras otro no aporta, y con el servidor caído el mismo
+    // error se repetía en cada envío. Así queda el primer error y la recuperación.
+    if(p_code != this->m_last_http_code)
+    {
+        logger.log("Codigo HTTP: ");
+        logger.logln(p_code);
+    }
+    else
+    {
+        logger.debug("Codigo HTTP: ");
+        logger.debugln(p_code);
+    }
+
+    this->m_last_http_code = p_code;
+}
+
 int Ethernet_HTTP::send_data_to_server(const uint8_t *p_data, size_t p_data_length)
 {
     if(!this->m_server || !this->m_endpoint)
@@ -10,8 +28,7 @@ int Ethernet_HTTP::send_data_to_server(const uint8_t *p_data, size_t p_data_leng
 
     int http_code = post_request(p_data, p_data_length);
 
-    logger.log("Codigo HTTP: ");
-    logger.logln(http_code);
+    log_http_code(http_code);
 
     return http_code;
 }
@@ -21,8 +38,7 @@ int Ethernet_HTTP::get_data_from_server(uint8_t *p_data, size_t p_data_length)
     int content_length = -1;
     int http_code = get_request(&content_length);
 
-    logger.log("Codigo HTTP: ");
-    logger.logln(http_code);
+    log_http_code(http_code);
 
     // En todas las salidas se cierra la conexión: antes los errores la dejaban
     // abierta y el W5500 solo tiene 8 sockets.
@@ -99,8 +115,7 @@ int Ethernet_HTTP::update_data(const uint8_t *p_data, size_t p_data_length)
 {
     int http_code = patch_request(p_data, p_data_length);
 
-    logger.log("Codigo HTTP: ");
-    logger.logln(http_code);
+    log_http_code(http_code);
 
     return http_code;
 }

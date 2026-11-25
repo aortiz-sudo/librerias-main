@@ -201,13 +201,13 @@ int Ethernet_WebSocket::handle_websocket_data(uint8_t *p_data, size_t p_length)
             for(int i = 0; i < p_length; i++)
             {
                 if(p_data[i] < 0x10)
-                    logger.log("0");
+                    logger.debug("0");
 
-                logger.log(p_data[i], HEX);
-                logger.log(" ");
+                logger.debug(p_data[i], HEX);
+                logger.debug(" ");
             }
 
-            logger.logln();
+            logger.debugln();
             send_close_message("ok"); 
             this->m_global_client->stop();
             return WEBSOCKET_CLOSE_FRAME_MESSAGE;

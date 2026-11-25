@@ -5,13 +5,18 @@ bool Ethernet_SocketIO::start_websocket_client()
     if(!connect_to_server())
         return false;
 
-    logger.log("Enviando Hansdshake a ");
-    logger.log(this->m_server);
-    logger.logln("...");
+    logger.debug("Enviando Hansdshake a ");
+    logger.debug(this->m_server);
+    logger.debugln("...");
 
     if(!handshake())
     {
-        logger.logln("Handshake rechazado");
+        // Mientras se reintenta la reconexión solo se registró la pérdida (report_connection()).
+        if(this->m_connected)
+            logger.logln("Handshake rechazado");
+        else
+            logger.debugln("Handshake rechazado");
+
         this->m_global_client->stop();
         return false;
     }
@@ -33,7 +38,7 @@ bool Ethernet_SocketIO::start_websocket_client()
         return false;
     }
 
-    logger.logln(response);
+    logger.debugln(response);
     if(!string_contains(response, "3probe"))
     {
         this->m_global_client->stop();
@@ -58,7 +63,7 @@ bool Ethernet_SocketIO::connect_to_namespace(int p_namespace_index)
     snprintf(&string[2], sizeof(string) - 3, "%s,{\"%s\":\"%s\"}", this->m_namespace[p_namespace_index], this->m_identifier, this->m_identifier_value);
     string[sizeof(string) - 1] = '\0';
 
-    logger.logln(string);
+    logger.debugln(string);
     send_text_message(string);
     
     bool client_available = false;
@@ -76,7 +81,7 @@ bool Ethernet_SocketIO::connect_to_namespace(int p_namespace_index)
     int length = 0;
     int type = get_message((uint8_t *)response, &length, 256);
 
-    logger.logln(response);
+    logger.debugln(response);
 
     if(type != WEBSOCKET_TEXT_MESSAGE || length == 0)
     {
@@ -96,8 +101,8 @@ bool Ethernet_SocketIO::connect_to_namespace(int p_namespace_index)
     parse_json(json, &key, &value, 1);
     get_json_key_value(&key, &value, "sid", &sid[0], 1);
 
-    logger.log("Session ID del namespace: ");
-    logger.logln(sid);
+    logger.debug("Session ID del namespace: ");
+    logger.debugln(sid);
     return true;
 }
 
@@ -240,7 +245,7 @@ bool Ethernet_SocketIO::handshake()
 
     http_code = http_response(&websocket_key_header, &websocket_key_value, 1, (uint8_t *)string, 256);
 
-    logger.logln(string);
+    logger.debugln(string);
 
     flush_headers();
 
@@ -267,9 +272,21 @@ void Ethernet_SocketIO::get_session_parameters(const char *p_string)
     this->m_ping_interval = atoi(str_ping_interval);
     this->m_ping_timeout = atoi(str_ping_timeout);
 
-    logger.logln(this->m_sid);
-    logger.logln(this->m_ping_interval);
-    logger.logln(this->m_ping_timeout);
+    logger.debugln(this->m_sid);
+    logger.debugln(this->m_ping_interval);
+    logger.debugln(this->m_ping_timeout);
+}
+
+void Ethernet_SocketIO::report_connection(bool p_connected, const char *p_message)
+{
+    // Solo los cambios: con el servidor caído handle_message() reintenta en cada ciclo de
+    // la tarea y cada intento repetía el mismo aviso en la SD.
+    if(p_connected != this->m_connected)
+        logger.logln(p_message);
+    else
+        logger.debugln(p_message);
+
+    this->m_connected = p_connected;
 }
 
 void Ethernet_SocketIO::set_identifer(const char *p_identifier, const char *p_value)
@@ -278,22 +295,67 @@ void Ethernet_SocketIO::set_identifer(const char *p_identifier, const char *p_va
     this->m_identifier_value = (char *)p_value;
 }
 
+void Ethernet_SocketIO::begin_reconnect()
+{
+    this->m_reconnecting = true;
+    this->m_reconnect_delay = 0;
+}
+
+void Ethernet_SocketIO::reconnect()
+{
+    // Sin esta espera se reintentaba en cada ciclo de la tarea (100 ms más lo que tarda la
+    // conexión) con http_mutex tomado: el W5500 no descansaba y el HTTP no podía enviar.
+    if(millis() - this->m_last_reconnect_millis < this->m_reconnect_delay)
+        return;
+
+    if(start_websocket_client())
+    {
+        for(int i = 0; i < this->m_namespace_counter; i++)
+            connect_to_namespace(i);
+
+        this->m_reconnecting = false;
+        this->m_reconnect_delay = 0;
+        report_connection(true, "Conexion al servidor Socket.IO restablecida.");
+
+        // Los eventos que el servidor emitió mientras no había conexión se perdieron.
+        if(this->m_reconnect_callback)
+            this->m_reconnect_callback();
+
+        return;
+    }
+
+    // La espera cuenta desde que terminó el intento: uno con timeout de TLS tarda segundos.
+    this->m_last_reconnect_millis = millis();
+
+    if(this->m_reconnect_delay == 0)
+        this->m_reconnect_delay = SOCKETIO_RECONNECT_MIN_MS;
+    else if(this->m_reconnect_delay < SOCKETIO_RECONNECT_MAX_MS)
+        this->m_reconnect_delay = min(this->m_reconnect_delay * 2, SOCKETIO_RECONNECT_MAX_MS);
+
+    logger.debug("No se pudo reconectar al servidor; siguiente intento en ");
+    logger.debug(this->m_reconnect_delay / 1000);
+    logger.debugln(" s.");
+}
+
 void Ethernet_SocketIO::handle_message()
 {
+    // Mientras se reintenta no se lee el socket: no hay conexión.
+    if(this->m_reconnecting)
+    {
+        reconnect();
+        return;
+    }
+
     unsigned long current_millis = millis();
 
     if(current_millis - this->m_last_ping > this->m_ping_interval + 10000)
     {
-        logger.logln("Se perdió la conexion al servidor.");
+        report_connection(false, "Se perdió la conexion al servidor.");
         this->m_global_client->flush();
         this->m_global_client->stop();
 
-        if(!start_websocket_client())
-            return;
-        
-        for(int i = 0; i < this->m_namespace_counter; i++)
-            connect_to_namespace(i);
-
+        begin_reconnect();
+        reconnect();
         return;
     }
 
@@ -303,17 +365,10 @@ void Ethernet_SocketIO::handle_message()
 
     if(message_type == WEBSOCKET_ERROR_NOT_CONNECTED)
     {
-        logger.logln("No hay conexion al servidor.");
+        report_connection(false, "No hay conexion al servidor.");
 
-        if(!start_websocket_client())
-        {
-            logger.logln("No se pudo reconectar al servidor.");
-            return;
-        }
-
-        for(int i = 0; i < this->m_namespace_counter; i++)
-            connect_to_namespace(i);
-        
+        begin_reconnect();
+        reconnect();
         return;
     }
 
@@ -338,7 +393,7 @@ void Ethernet_SocketIO::handle_message()
     {
         case PING_MESSAGE:
         {
-            logger.logln("Mensaje ping");
+            logger.debugln("Mensaje ping");
 
             this->m_last_ping = current_millis;
 
@@ -352,13 +407,13 @@ void Ethernet_SocketIO::handle_message()
 
         case PONG_MESSAGE:
         {
-            logger.logln("Mensaje pong");
+            logger.debugln("Mensaje pong");
             return;
         }
 
         case NORMAL_MESSAGE:
         {
-            logger.logln((const char *)&data[0]);
+            logger.debugln((const char *)&data[0]);
             event_handler((const char *)&data[1], length - 1);
             return;
         }
@@ -430,8 +485,8 @@ bool Ethernet_SocketIO::send_event(const char *p_namespace, const char *p_event_
 
     buffer[sizeof(buffer) - 1] = '\0';
 
-    logger.log("Enviando evento: ");
-    logger.logln(buffer);
+    logger.debug("Enviando evento: ");
+    logger.debugln(buffer);
     bool ret = send_text_message(buffer) >= 1 ? true : false;
     return ret;
 }

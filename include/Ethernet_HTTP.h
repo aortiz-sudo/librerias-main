@@ -83,10 +83,18 @@ class Ethernet_HTTP : public Global_Client
          * \returns                     Respuesta HTTP.
          */
         int handle_response();
-    
+
+        /**
+         * \brief           Registra el código HTTP solo cuando cambia respecto a la petición
+         *                  anterior; si se repite va al nivel de detalle (debug).
+         * \param p_code    Código HTTP o de error de la petición.
+         */
+        void log_http_code(int p_code);
+
     private:
 
         char m_response[2048] = { 0 }; ///< Buffer para la respuesta HTTP del servidor.
+        int m_last_http_code = 200;    ///< Código de la petición anterior (200 al arrancar: el primer OK no se registra).
 
 };
 

@@ -187,6 +187,9 @@ El ESP32 lee su configuración desde la tarjeta SD al arrancar. Los archivos pri
 | `/backups/`             | Respaldos de los archivos anteriores.                                          |
 | `/firmwares/`           | Binarios descargados para OTA (`firmware.bin`, `display.bin`, `printer.bin`).  |
 | `/coredump.elf`         | Volcado de memoria tras un reinicio inesperado.                                |
+| `/data.log`             | Log del equipo (solo en release). Al llegar a 256 KB (`LOG_MAX_SIZE` en `include/Logger.h`) se renombra a `/data.old.log` y empieza uno nuevo, así que entre los dos ocupan como máximo ~512 KB. |
+
+> El log de la SD solo guarda lo que sirve para diagnosticar en campo: errores, cambios de estado (red, servidor, impresora, sensor), un resumen del arranque, despachos y actualizaciones. Un error que se repite se registra la primera vez y cuando se recupera, no en cada reintento. El detalle de desarrollo (`logger.debug()`: JSON, tramas, pantallas, pings) solo sale por el puerto serie en los entornos de depuración. Las claves de usuario, la API key y el token de GitHub ya no se escriben en la SD.
 
 > La configuración de red (IP estática, gateway, DNS, puerto) y las direcciones I2C/pines se definen en `include/main.h` y en `config_ethernet()` dentro de `src/main.cpp`.
 

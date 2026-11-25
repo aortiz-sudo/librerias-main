@@ -218,6 +218,7 @@ class Global_Client
         bool m_secure = false;                      ///< Indica si la conexión es segura (SSL).
         char *m_certificate = nullptr;              ///< Certificado SSL.
         uint32_t m_x509_time = 0;                   ///< Hora para validar el certificado (0 = la de la librería).
+        bool m_connect_failed = false;              ///< El último intento de conexión falló (el log solo registra el primero).
 
         char *m_header[MAX_HTTP_HEADERS] =          ///< Encabezados personalizados.
         { 
