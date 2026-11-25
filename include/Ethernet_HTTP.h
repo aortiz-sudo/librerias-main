@@ -94,7 +94,7 @@ class Ethernet_HTTP : public Global_Client
     private:
 
         char m_response[2048] = { 0 }; ///< Buffer para la respuesta HTTP del servidor.
-        int m_last_http_code = 200;    ///< Código de la petición anterior (200 al arrancar: el primer OK no se registra).
+        int m_last_http_code = 200;    ///< Resultado de la petición anterior: 200 para cualquier 2xx (al arrancar, el primer OK no se registra).
 
 };
 

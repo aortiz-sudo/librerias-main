@@ -6,8 +6,11 @@ static constexpr unsigned long HTTP_BODY_TIMEOUT_MS = 5000;
 void Ethernet_HTTP::log_http_code(int p_code)
 {
     // Solo cuando cambia: un 200 tras otro no aporta, y con el servidor caído el mismo
-    // error se repetía en cada envío. Así queda el primer error y la recuperación.
-    if(p_code != this->m_last_http_code)
+    // error se repetía en cada envío. Así queda el primer error y la recuperación. Todos
+    // los 2xx cuentan como el mismo resultado: los GET regresan 200 y el POST de eventos 201.
+    int result = (p_code / 100 == 2) ? 200 : p_code;
+
+    if(result != this->m_last_http_code)
     {
         logger.log("Codigo HTTP: ");
         logger.logln(p_code);
@@ -18,7 +21,7 @@ void Ethernet_HTTP::log_http_code(int p_code)
         logger.debugln(p_code);
     }
 
-    this->m_last_http_code = p_code;
+    this->m_last_http_code = result;
 }
 
 int Ethernet_HTTP::send_data_to_server(const uint8_t *p_data, size_t p_data_length)

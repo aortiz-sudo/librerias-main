@@ -23,6 +23,20 @@
 #define LOG_MAX_SIZE (256UL * 1024UL)
 
 /**
+ * \def   LOG_LINE_SIZE
+ * \brief Largo máximo de un renglón armado con varias llamadas a log(); lo que no cabe
+ *        se descarta.
+ */
+#define LOG_LINE_SIZE 320
+
+/**
+ * \def   LOG_PENDING_LINES
+ * \brief Renglones a medias que pueden esperar a la vez (uno por tarea). Si no hay lugar,
+ *        el fragmento se escribe como renglón propio.
+ */
+#define LOG_PENDING_LINES 6
+
+/**
  * \class   Logger
  * \brief   Envia logs al puerto serie o al archivo data.log en la tarjeta SD,
  *          dependiendo si esta en modo debug o producción.
@@ -33,9 +47,9 @@
  * - debug()/debugln(): detalle de desarrollo (tramas, JSON, pantallas, cada ping...).
  *   Solo sale por el puerto serie en depuración; nunca se guarda en la SD.
  *
- * En la SD cada renglón lleva la fecha una sola vez, aunque se arme con varias llamadas
- * (log("Fuel: "); logln(nivel);). Si otra tarea escribe mientras un renglón está a
- * medias, ese renglón se cierra primero, así cada renglón es de una sola tarea.
+ * Un renglón armado con varias llamadas (log("Fuel: "); logln(nivel);) se acumula por
+ * tarea y se escribe completo, con una sola fecha, al terminarlo con logln(). Así otra
+ * tarea que escribe a la vez no lo parte ni se mezcla con él.
  */
 class Logger : public Print
 {
@@ -154,9 +168,9 @@ class Logger : public Print
 
     private:
         /**
-         * \brief           Escribe un fragmento del log: abre el archivo, cierra el renglón que
-         *                  otra tarea haya dejado a medias, pone la fecha al inicio del renglón
-         *                  y escribe los datos con print()/println().
+         * \brief           Escribe en el log. Sin salto de línea, el fragmento se acumula en el
+         *                  renglón pendiente de la tarea; con salto de línea se escribe el
+         *                  renglón completo: fecha, lo acumulado y los datos.
          * \param p_newline true: termina el renglón (println).
          * \param p_args    Argumentos para print()/println().
          */
@@ -175,8 +189,6 @@ class Logger : public Print
         uint8_t *m_rtc[6] = { nullptr, nullptr, nullptr, nullptr, nullptr, nullptr }; ///< Array de punteros para fecha y hora (año, mes, día, hora, minuto, segundo).
         File m_file_logger; ///< Archivo para guardar los logs en la SD.
         bool m_use_file = false; ///< Indica si se utiliza el archivo para guardar logs.
-        bool m_at_line_start = true; ///< El siguiente fragmento empieza renglón (lleva fecha).
-        TaskHandle_t m_line_owner = nullptr; ///< Tarea que escribió el último fragmento.
 };
 
 /**

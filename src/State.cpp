@@ -117,7 +117,7 @@ void login_state::screen(char p_key)
     {
         this->m_keypad_buffer[this->m_digit_counter] = p_key;
         m_password_text[this->m_digit_counter] = '*';
-        logger.debug(this->m_password_text);
+        logger.debugln(this->m_password_text);
         m_digit_counter++;
         this->m_device->write_to_address(DISPLAY_PASSWORD_ADDRESS, (uint8_t *)this->m_password_text, sizeof(this->m_password_text) - 1); 
         return;
@@ -129,7 +129,7 @@ void login_state::screen(char p_key)
     {
         this->m_password_text[this->m_digit_counter - 1] = ' ';
         this->m_digit_counter = (this->m_digit_counter != 0) ? (this->m_digit_counter - 1) : 0;
-        logger.debug(this->m_password_text);
+        logger.debugln(this->m_password_text);
         this->m_device->write_to_address(DISPLAY_PASSWORD_ADDRESS, (uint8_t *)this->m_password_text, sizeof(this->m_password_text) - 1);
 
         return;

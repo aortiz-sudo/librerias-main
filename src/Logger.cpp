@@ -31,6 +31,62 @@ class Null_Print : public Print
 
 static Null_Print null_print;
 
+/**
+ * \brief Renglón a medias de una tarea: log() acumula aquí y logln() lo escribe completo.
+ *        Lo que pase de LOG_LINE_SIZE se descarta.
+ */
+class Pending_Line : public Print
+{
+    public:
+        TaskHandle_t owner = nullptr; ///< Tarea dueña; nullptr si el lugar está libre.
+        size_t length = 0;
+        char data[LOG_LINE_SIZE];
+
+        size_t write(uint8_t p_data) override
+        {
+            if(this->length >= sizeof(this->data))
+                return 0;
+
+            this->data[this->length++] = (char)p_data;
+            return 1;
+        }
+
+        void release()
+        {
+            this->owner = nullptr;
+            this->length = 0;
+        }
+};
+
+static Pending_Line pending_lines[LOG_PENDING_LINES];
+
+/**
+ * \brief           Busca el renglón pendiente de una tarea (con el log ya bloqueado).
+ * \param p_task    Tarea.
+ * \param p_create  Si la tarea no tiene renglón, le asigna un lugar libre.
+ * \returns         El renglón, o nullptr si no tiene (o no hay lugar libre).
+ */
+static Pending_Line *find_pending_line(TaskHandle_t p_task, bool p_create)
+{
+    Pending_Line *free_line = nullptr;
+
+    for(Pending_Line &line : pending_lines)
+    {
+        if(line.owner == p_task)
+            return &line;
+
+        if(free_line == nullptr && line.owner == nullptr)
+            free_line = &line;
+    }
+
+    if(!p_create || free_line == nullptr)
+        return nullptr;
+
+    free_line->owner = p_task;
+    free_line->length = 0;
+    return free_line;
+}
+
 void Logger::set_serial_muted(bool p_muted)
 {
     Log_Lock lock;
@@ -118,8 +174,8 @@ bool Logger::open_file()
     if(!this->m_file_logger)
         return false;
 
-    // Solo se rota entre renglones, para no partir uno en los dos archivos.
-    if(this->m_at_line_start && this->m_file_logger.size() >= LOG_MAX_SIZE)
+    // Se abre solo para escribir renglones completos: rotar aquí nunca parte uno.
+    if(this->m_file_logger.size() >= LOG_MAX_SIZE)
     {
         this->m_file_logger.close();
 
@@ -145,33 +201,43 @@ void Logger::entry(bool p_newline, const Args&... p_args)
     if(this->m_logger == nullptr)
         return;
 
+    // Cada tarea arma su renglón aparte: antes, si la descarga de la plataforma y un evento
+    // de Socket.IO escribían a la vez, sus renglones quedaban partidos entre las dos tareas.
+    Pending_Line *line = find_pending_line(xTaskGetCurrentTaskHandle(), !p_newline);
+
+    if constexpr (sizeof...(p_args) > 0)
+    {
+        if(!p_newline && line != nullptr)
+        {
+            line->print(p_args...);
+            return;
+        }
+    }
+
+    // Aquí se escribe un renglón completo. Sin lugar para acumular, el fragmento de log()
+    // sale como renglón propio.
     if(this->m_use_file && !open_file())
+    {
+        if(line != nullptr)
+            line->release();
+
         return;
-
-    TaskHandle_t task = xTaskGetCurrentTaskHandle();
-
-    if(!this->m_at_line_start && task != this->m_line_owner)
-    {
-        this->m_logger->println();
-        this->m_at_line_start = true;
     }
 
-    // logln() sin argumentos solo termina el renglón: no lleva fecha.
-    if constexpr (sizeof...(p_args) == 0)
-        this->m_logger->println();
-    else
-    {
-        if(this->m_at_line_start)
-            log_date();
+    // logln() sin argumentos y sin renglón pendiente deja un renglón vacío, sin fecha.
+    if(sizeof...(p_args) > 0 || line != nullptr)
+        log_date();
 
-        if(p_newline)
-            this->m_logger->println(p_args...);
-        else
-            this->m_logger->print(p_args...);
+    if(line != nullptr)
+    {
+        this->m_logger->write((const uint8_t *)line->data, line->length);
+        line->release();
     }
 
-    this->m_at_line_start = p_newline;
-    this->m_line_owner = task;
+    if constexpr (sizeof...(p_args) > 0)
+        this->m_logger->print(p_args...);
+
+    this->m_logger->println();
 
     if(this->m_use_file)
         this->m_file_logger.close();
