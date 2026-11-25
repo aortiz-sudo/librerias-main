@@ -385,8 +385,22 @@ int I2C_Master_Device::bootloader_status()
 {
     xSemaphoreTake(i2c_mutex, portMAX_DELAY);
     TwoWire *port = static_cast<TwoWire *>(get_port());
-    size_t received = port->requestFrom((uint8_t)(this->m_address + 0x10), (uint8_t)1);
-    int value = (received == 1 && port->available()) ? port->read() : -1;
+    uint8_t bootloader_address = this->m_address + 0x10;
+    int value = -1;
+
+    // Primero una escritura vacía, como en device_ready(): sin bootloader falla al instante (el
+    // bootloader ignora las tramas vacías). Una lectura a una dirección que no responde tarda ~1 s
+    // en fallar con este core ("i2cRead returned Error 263"), y check_atmega_recovery() hacía dos
+    // cada minuto: la pantalla se congelaba ~2 s. A las direcciones de las apps no se les manda
+    // la escritura vacía: la impresora (y el display hasta la 1.1.0) la ejecutan como comando.
+    port->beginTransmission(bootloader_address);
+
+    if(port->endTransmission() == 0)
+    {
+        size_t received = port->requestFrom(bootloader_address, (uint8_t)1);
+        value = (received == 1 && port->available()) ? port->read() : -1;
+    }
+
     while(port->available())
         port->read();
     xSemaphoreGive(i2c_mutex);
