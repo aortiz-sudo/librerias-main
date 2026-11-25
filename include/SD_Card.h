@@ -20,6 +20,7 @@
 #define CA_CERT_PATH                    "/ca-cert.pem"             ///< Ruta para el certificado SSL raíz.
 #define USERS_PATH                      "/usuarios.txt"            ///< Ruta para los usuarios.
 #define TAGS_PATH                       "/tags.txt"                ///< Ruta para los tags registrados en la plataforma.
+#define ALLOCATIONS_PATH                "/asignaciones.txt"        ///< Ruta para las asignaciones de litros de los tags con límite.
 #define AFTERFLOW_PATH                  "/escurrimiento.txt"       ///< Ruta de los tiempos del escurrimiento (mínimo y sin pulsos, en ms).
 #define EVENTS_TMP_PATH                 "/Eventos_tmp.txt"         ///< Ruta temporal de los eventos.
 #define PARAMETERS_BACKUP_PATH          "/backups/Parametros.txt"  ///< Ruta para respaldo de los parametros.
@@ -48,6 +49,7 @@ typedef enum : uint8_t
     SAVE_USERS_LIST,        ///< Reescribir /usuarios.txt con la última lista de usuarios.
     SAVE_TAGS_LIST,         ///< Reescribir /tags.txt con la lista de tags.
     SAVE_FILE,              ///< Reescribir un archivo completo con el texto recibido.
+    SAVE_ALLOCATIONS_LIST,  ///< Reescribir /asignaciones.txt con las asignaciones y su consumo local.
 } save_type_t;
 
 /**

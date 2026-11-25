@@ -522,6 +522,7 @@ extern "C"
 
 #define MAX_NUMBER_OF_USERS 32          ///< Número máximo de usuarios registrados.
 #define MAX_NUMBER_OF_TAGS 64           ///< Número máximo de tags registrados.
+#define MAX_NUMBER_OF_ALLOCATIONS 64    ///< Número máximo de asignaciones de litros (el tope que regresa la plataforma).
 #define TAG_ID_SIZE 24                  ///< Tamaño máximo del identificador de un tag (incluye el nulo).
 #define MAX_NUMBER_OF_DISPATCHES 48     ///< Número máximo de despachos almacenados.
 
@@ -545,12 +546,21 @@ extern "C"
  */
 #define PLATFORM_SYNC_MIN_GAP_MS  300000UL
 /**
+ * \def   PLATFORM_LIMITS_SYNC_INTERVAL_MS
+ * \brief Intervalo para volver a descargar tags y asignaciones de litros (30 minutos).
+ *        La plataforma avisa por Socket.IO (asignacionActualizada) al cambiar una
+ *        asignación o el límite de un tag, pero no al dar de alta o de baja un tag.
+ */
+#define PLATFORM_LIMITS_SYNC_INTERVAL_MS 1800000UL
+/**
  * \def   PLATFORM_BUFFER_SIZE
  * \brief Tamaño del buffer para las respuestas de la plataforma. Cada usuario
- *        ocupa unos 230 bytes y cada tag unos 190, así que caben los
- *        MAX_NUMBER_OF_USERS usuarios o los MAX_NUMBER_OF_TAGS tags con margen.
+ *        ocupa unos 230 bytes, cada tag hasta unos 300 (con vehículo, sucursal y
+ *        límite) y cada asignación unos 170, así que caben los MAX_NUMBER_OF_USERS
+ *        usuarios, los MAX_NUMBER_OF_TAGS tags o las MAX_NUMBER_OF_ALLOCATIONS
+ *        asignaciones con margen.
  */
-#define PLATFORM_BUFFER_SIZE      16384
+#define PLATFORM_BUFFER_SIZE      24576
 
 /*--------------- LECTURA DEL TAG EN EL DESPACHO ---------------*/
 /**

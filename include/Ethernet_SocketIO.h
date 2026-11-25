@@ -13,7 +13,7 @@
  * \def     MAX_NUMBER_OF_EVENTS
  * \brief   Número máximo de eventos que puede manejar el cliente Socket.IO.
  */
-#define MAX_NUMBER_OF_EVENTS 4
+#define MAX_NUMBER_OF_EVENTS 6
 
 /**
  * \def     MAX_NUMBER_OF_NAMESPACES

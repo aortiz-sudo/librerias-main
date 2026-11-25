@@ -257,6 +257,24 @@ struct tag_record
 {
   int id;
   char identifier[TAG_ID_SIZE];
+  bool limited;                   ///< true: solo despacha con una asignación de litros vigente y con saldo.
+};
+
+/**
+ * Asignación de litros de un tag con límite. Las cantidades van en centésimas de litro,
+ * igual que en el evento de despacho ("%u.%02u"), para que lo que se descuenta aquí sea
+ * exactamente lo que se le resta a la plataforma.
+ */
+struct allocation_record
+{
+  uint32_t id;                    ///< Id de la asignación (viaja en el evento como idAsignacion).
+  int tag_id;                     ///< tag.id en la plataforma.
+  char identifier[TAG_ID_SIZE];   ///< tag.identificador.
+  int32_t liters;                 ///< Litros asignados.
+  int32_t consumed;               ///< Consumidos según la última descarga (incluye todos los despachos ya confirmados).
+  int32_t pending;                ///< Despachado en este equipo que la plataforma todavía no confirma (201).
+  uint32_t start_date;            ///< fechaInicio como AAAAMMDD (inclusive).
+  uint32_t end_date;              ///< fechaFin como AAAAMMDD (inclusive).
 };
 
 /**
@@ -274,17 +292,28 @@ static tag_record tags[MAX_NUMBER_OF_TAGS] = {};
 static int number_of_tags = 0;
 static bool tags_available = false;
 
+/**
+ * Asignaciones de litros de este dispositivo, una vigente por tag. Sin conexión se despacha
+ * con la última descarga y lo despachado se descuenta aquí (allocation_record::pending).
+ */
+static allocation_record allocations[MAX_NUMBER_OF_ALLOCATIONS] = {};
+static int number_of_allocations = 0;
+
 /// Resultado de buscar un tag leído en la lista de tags registrados.
 typedef enum : uint8_t
 {
-  TAG_REGISTERED,       ///< El tag está registrado: se puede despachar.
+  TAG_REGISTERED,       ///< El tag está registrado (y, si tiene límite, tiene saldo): se puede despachar.
   TAG_NOT_REGISTERED,   ///< Hay lista, pero el tag no está en ella.
-  TAG_NO_LIST           ///< No hay lista de tags descargada ni guardada en la SD.
+  TAG_NO_LIST,          ///< No hay lista de tags descargada ni guardada en la SD.
+  TAG_NO_ALLOCATION,    ///< El tag tiene límite y no tiene asignación vigente hoy (vencida, futura o cancelada).
+  TAG_NO_BALANCE        ///< El tag tiene límite y su asignación vigente ya no tiene saldo.
 } tag_status_t;
 
 /// Mensajes de la pantalla de despacho cuando se rechaza un tag (17 caracteres).
 static const char *unregistered_tag_message = "Tag no registrado";
 static const char *no_tag_list_message      = "Sin lista de tags";
+static const char *no_allocation_message    = "Sin asignacion   ";
+static const char *no_balance_message       = "Saldo agotado    ";
 
 /// Mutex para las listas de usuarios y tags (las usan las cuatro tareas).
 static SemaphoreHandle_t lists_mutex;
@@ -338,6 +367,10 @@ static const char *firmware_update_event = "actualizacionFirmware";
 static const char *firmware_update_state_event = "resultadoActualizacionFirmware";
 /// Evento de conexión de dispositivo.
 static const char *device_connected_event = "deviceConnected";
+/// Evento de cambio de una asignación de litros o del límite de un tag (payload vacío).
+static const char *allocation_update_event = "asignacionActualizada";
+/// Evento de API key creada o rotada desde la plataforma.
+static const char *api_key_event = "apiKey";
 
 /// Token de github
 static char github_token[GITHUB_TOKEN_SIZE] = "";
@@ -395,6 +428,7 @@ static char ca_cert[CA_CERT_SIZE] = { 0 };
 static char data_endpoint[32] = "/api/data/";
 static char product_endpoint[32] = "/api/productos";
 static char tags_endpoint[32] = "/api/tags";
+static char allocations_endpoint[32] = "/api/asignaciones";
 static char device_endpoint[32] = "/api/dispositivos";
 static char users_endpoint[32] = "/api/usuarios?cliente=";
 
@@ -498,8 +532,8 @@ bool send_data(const char *p_json);
 bool update_data(json_update_struct *p_json);
 /** @brief Envía una actualización JSON a un endpoint específico. @param p_json Cadena JSON a enviar. @param p_endpoint Endpoint destino. @return true si se envió correctamente. */
 bool update_data(const char *p_json, const char *p_endpoint);
-/** @brief Genera y encola un evento del sistema. @param p_event Tipo de evento. @param p_use_password Indica si se incluye la contraseña. @param p_quantity Cantidad asociada al evento. @param p_use_tag Indica si se incluye el tag RFID. */
-void trigger_event(json_event p_event, bool p_use_password = false, float p_quantity = 0, bool p_use_tag = false);
+/** @brief Genera y encola un evento del sistema. @param p_event Tipo de evento. @param p_use_password Indica si se incluye la contraseña. @param p_quantity Cantidad asociada al evento. @param p_use_tag Indica si se incluye el tag RFID. @param p_allocation_id Asignación de litros aplicada al despacho, o 0. */
+void trigger_event(json_event p_event, bool p_use_password = false, float p_quantity = 0, bool p_use_tag = false, uint32_t p_allocation_id = 0);
 /** @brief Genera y encola una actualización del sistema. @param p_update Tipo de actualización. @param p_price Nuevo precio. @param p_product Producto asociado. @param p_id Identificador de la entidad. */
 void trigger_update(json_update p_update, const char *p_price, const char *p_product, uint32_t p_id);
 /** @brief Revisa y procesa la cola de eventos. */
@@ -530,8 +564,24 @@ void apply_pending_users();
 void save_users_to_sd();
 /** @brief Reescribe /tags.txt con la lista de tags. */
 void save_tags_to_sd();
-/** @brief Busca un tag leído en la lista de tags registrados. @param p_tag Tag leído. @param p_identifier Buffer para el identificador registrado. @param p_identifier_size Tamaño del buffer. @return Resultado de la búsqueda. */
-tag_status_t find_tag(const char *p_tag, char *p_identifier, size_t p_identifier_size);
+/** @brief Busca un tag leído en la lista de tags registrados. @param p_tag Tag leído. @param p_record Copia del tag registrado. @return Resultado de la búsqueda. */
+tag_status_t find_tag(const char *p_tag, tag_record *p_record);
+/** @brief Descarga las asignaciones de litros de este dispositivo. @return true si la descarga fue válida. */
+bool sync_allocations();
+/** @brief Descarga los tags y las asignaciones (aviso asignacionActualizada y cada 30 min). */
+void sync_limits();
+/** @brief Carga las asignaciones guardadas en la tarjeta SD. */
+void config_allocations();
+/** @brief Reescribe /asignaciones.txt con las asignaciones y su consumo local. */
+void save_allocations_to_sd();
+/** @brief Valida un tag registrado contra su asignación de litros. @param p_tag Tag registrado. @param p_allocation_id Asignación que se aplica, o 0 si el tag no tiene límite. @param p_liters Litros disponibles, o -1 si el tag no tiene límite. @return TAG_REGISTERED si se puede despachar; TAG_NO_ALLOCATION o TAG_NO_BALANCE si no. */
+tag_status_t check_allocation(const tag_record *p_tag, uint32_t *p_allocation_id, float *p_liters);
+/** @brief Descuenta de una asignación lo despachado en este equipo. @param p_allocation_id Asignación. @param p_centiliters Centésimas de litro despachadas. */
+void add_pending_consumption(uint32_t p_allocation_id, int32_t p_centiliters);
+/** @brief Marca como recibido por la plataforma lo despachado de una asignación. @param p_allocation_id Asignación. @param p_centiliters Centésimas de litro confirmadas. */
+void confirm_consumption(uint32_t p_allocation_id, int32_t p_centiliters);
+static int32_t parse_centiliters(const char *p_text);
+static void confirm_batch_consumption(const char *p_json);
 /** @brief Compara dos identificadores de tag (los numéricos por valor). @return true si son el mismo tag. */
 bool same_tag(const char *p_tag_a, const char *p_tag_b);
 /** @brief Busca el nombre de un usuario por su id. @param p_user_id Id del usuario. @return Nombre del usuario, o cadena vacía si no está. */
@@ -581,6 +631,10 @@ void update_product(const char *p_payload);
 void update_firmware(const char *p_payload);
 /** @brief Callback de Socket.IO ejecutado cuando el dispositivo se conecta. @param payload Carga útil del evento de conexión. */
 void device_connected(const char *payload);
+/** @brief Callback de Socket.IO: cambió una asignación o el límite de un tag; pide descargar tags y asignaciones. @param p_payload Carga útil (vacía). */
+void allocation_updated(const char *p_payload);
+/** @brief Callback de Socket.IO: se creó o rotó la API key del cliente; la guarda en la SD. @param p_payload {"apikey":"<idCliente>:<apikey>"}. */
+void api_key_updated(const char *p_payload);
 
 /* ========================= Funciones constructoras  =========================*/
 
@@ -701,6 +755,10 @@ static void on_socketio_reconnected()
   platform_sync_requested = true;
 }
 
+/// La plataforma avisó (asignacionActualizada) que cambió una asignación o el límite de un
+/// tag. Lo levanta Websocket_Task y lo atiende HTTP_Task con sync_limits().
+static volatile bool limits_sync_requested = false;
+
 /**
  * @brief Tarea encargada de la comunicación HTTP con el servidor.
  * @param pvParameters Parámetros de la tarea (no utilizados).
@@ -725,6 +783,7 @@ void HTTP_Task(void *pvParameters)
 
   unsigned long last_millis = 0;
   unsigned long last_sync_millis = 0;
+  unsigned long last_limits_sync_millis = 0;
   unsigned long sync_interval = 0;
   bool sync_attempted = false;
   bool sync_failed = false;
@@ -775,6 +834,21 @@ void HTTP_Task(void *pvParameters)
         logger.debugln("No se pudieron descargar los datos de la plataforma.");
 
       sync_failed = !synced;
+      last_limits_sync_millis = last_sync_millis;
+    }
+
+    // Tags y asignaciones de litros: al avisar la plataforma y cada 30 min, porque la
+    // plataforma no avisa al dar de alta o de baja un tag. Sin red se sigue despachando
+    // con lo último descargado.
+    if(ethernet_begin && sync_attempted &&
+       (limits_sync_requested || millis() - last_limits_sync_millis >= PLATFORM_LIMITS_SYNC_INTERVAL_MS))
+    {
+      if(limits_sync_requested)
+        logger.logln("La plataforma aviso cambios en tags o asignaciones; se descargan.");
+
+      limits_sync_requested = false;
+      sync_limits();
+      last_limits_sync_millis = millis();
     }
 
     if(current_millis - last_millis > 60000)
@@ -816,6 +890,8 @@ void Websocket_Task(void *pvParameters)
   websocket_client->set_event(user_update_event, update_user);
   websocket_client->set_event(product_update_event, update_product);
   websocket_client->set_event(firmware_update_event, update_firmware);
+  websocket_client->set_event(allocation_update_event, allocation_updated);
+  websocket_client->set_event(api_key_event, api_key_updated);
   websocket_client->set_reconnect_callback(on_socketio_reconnected);
   websocket_client->set_identifer(websocket_identifier, device_name);
   int device_namespace_index = websocket_client->set_namespace(socket_io_device_namespace);
@@ -981,6 +1057,7 @@ void setup()
   sync_ticket_number();
   config_users();
   config_tags();
+  config_allocations();
   read_api_key();
   read_ca_cert();
   config_github();
@@ -1413,7 +1490,14 @@ void dispatch(uint8_t *p_dispatch_volume, int args)
 
       // El despacho solo arranca con un tag registrado, así que el evento siempre
       // lleva su tag, aunque se termine en pausa porque ya no se leía.
-      trigger_event(FUEL_DISPATCHED, true, liters, true);
+      uint32_t allocation_id = screen->get_tag_allocation_id();
+      trigger_event(FUEL_DISPATCHED, true, liters, true, allocation_id);
+
+      // Se descuenta del saldo en cuanto termina, con o sin red, con los mismos litros
+      // del evento (incluido el excedente del cierre); se libera cuando la plataforma
+      // confirma el evento (confirm_consumption()).
+      if(allocation_id > 0)
+        add_pending_consumption(allocation_id, (int32_t)(uint32_t)(liters * 100));
       char str_dispatch[160];
       build_dispatch_string(str_dispatch, liters);
 
@@ -2016,12 +2100,25 @@ void config_tags()
     String line = file.readStringUntil('\n');
     line.trim();
 
+    // "id,identificador,limite". Las listas guardadas antes de la asignación de litros
+    // no tienen el tercer campo: esos tags quedan sin límite.
     int comma = line.indexOf(',');
 
     if(comma < 0)
       continue;
 
     String identifier = line.substring(comma + 1);
+    bool limited = false;
+    int last_comma = identifier.lastIndexOf(',');
+
+    if(last_comma >= 0)
+    {
+      String flag = identifier.substring(last_comma + 1);
+      flag.trim();
+      limited = flag == "1";
+      identifier = identifier.substring(0, last_comma);
+    }
+
     identifier.trim();
 
     if(identifier.length() == 0)
@@ -2031,6 +2128,7 @@ void config_tags()
     tag->id = line.substring(0, comma).toInt();
     strncpy(tag->identifier, identifier.c_str(), sizeof(tag->identifier));
     tag->identifier[sizeof(tag->identifier) - 1] = '\0';
+    tag->limited = limited;
   }
 
   file.close();
@@ -2764,29 +2862,58 @@ void get_rfid_data()
     char read_tag[16];
     snprintf(read_tag, sizeof(read_tag), "%010u", int_tag);
 
-    // Solo se despacha con un tag registrado en la plataforma.
-    char identifier[TAG_ID_SIZE];
-    tag_status_t tag_status = find_tag(read_tag, identifier, sizeof(identifier));
+    // Solo se despacha con un tag registrado en la plataforma y, si tiene límite, con
+    // una asignación vigente hoy que todavía tenga saldo.
+    tag_record tag = {};
+    uint32_t allocation_id = 0;
+    float allowance = -1.0f;
+    tag_status_t tag_status = find_tag(read_tag, &tag);
+
+    if(tag_status == TAG_REGISTERED)
+      tag_status = check_allocation(&tag, &allocation_id, &allowance);
 
     if(tag_status == TAG_REGISTERED)
     {
       // En el evento viaja el identificador tal como está en la plataforma.
-      snprintf(str_tag, sizeof(str_tag), "\"%s\"", identifier);
+      snprintf(str_tag, sizeof(str_tag), "\"%s\"", tag.identifier);
       dispatch_tag = int_tag;
       has_dispatch_tag = true;
       missed_reads = 0;
+
+      // El saldo va antes del aviso de tag detectado: la pantalla lo usa al arrancar.
+      screen->set_tag_allowance(session, allocation_id, allowance);
       screen->set_tag_status(session, true, nullptr);
 
       logger.log("Tag valido, inicia el despacho: ");
       logger.logln(str_tag);
+
+      if(allocation_id > 0)
+      {
+        logger.log("Saldo de la asignacion ");
+        logger.log(allocation_id);
+        logger.log(": ");
+        logger.log(allowance, 2);
+        logger.logln(" L");
+      }
     }
     else
     {
-      screen->set_tag_status(session, false, tag_status == TAG_NO_LIST ? no_tag_list_message : unregistered_tag_message);
+      const char *message = unregistered_tag_message;
+      const char *log_text = "Tag no registrado: ";
+
+      switch(tag_status)
+      {
+        case TAG_NO_LIST:       message = no_tag_list_message;   log_text = "Sin lista de tags; se rechaza el tag "; break;
+        case TAG_NO_ALLOCATION: message = no_allocation_message; log_text = "Tag con limite sin asignacion vigente: "; break;
+        case TAG_NO_BALANCE:    message = no_balance_message;    log_text = "Tag con limite sin saldo: "; break;
+        default: break;
+      }
+
+      screen->set_tag_status(session, false, message);
 
       if(int_tag != last_rejected_tag)
       {
-        logger.log(tag_status == TAG_NO_LIST ? "Sin lista de tags; se rechaza el tag " : "Tag no registrado: ");
+        logger.log(log_text);
         logger.logln(read_tag);
         last_rejected_tag = int_tag;
       }
@@ -2849,6 +2976,10 @@ void save_to_sd()
         save_tags_to_sd();
       break;
 
+      case SAVE_ALLOCATIONS_LIST:
+        save_allocations_to_sd();
+      break;
+
       case SAVE_FILE:
         if(!write_to_file(sd_info.path, sd_info.data))
           logger.logln("No se pudo guardar el archivo.");
@@ -2878,11 +3009,23 @@ void save_to_sd()
 bool send_data(json_event_struct *p_json)
 {
   char json[MAX_EVENT_JSON_LENGTH]  = "";
-  int length = snprintf(json, sizeof(json), "[{\"fecha\":\"20%02u-%02u-%02uT%02u:%02u:%02u\",\"idEvento\":%u,\"folio\":%s,\"nivel\":%u,\"temperatura\":%d,\"energia\":%u.%02u,\"abierto\":%u,\"clave\":%s,\"idUsuario\":%s,\"cantidad\":%s,\"tag\":%s}]", 
-                        p_json->year, p_json->month, p_json->day, p_json->hour, p_json->minute, p_json->second, p_json->event, p_json->ticket_number, p_json->fuel_level, p_json->fuel_temp, p_json->int_battery_level, p_json->dec_battery_level, p_json->open, 
-                        p_json->password, p_json->user_id, p_json->quantity_dispatched, p_json->tag);
-  
+  char allocation_field[32] = "";
+
+  // Sin asignación (tag sin límite u otro evento) el campo se omite, como permite la
+  // plataforma: el evento queda igual al formato anterior y lo acepta un servidor
+  // que todavía no tiene las asignaciones.
+  if(p_json->allocation_id > 0)
+    snprintf(allocation_field, sizeof(allocation_field), ",\"idAsignacion\":%lu", (unsigned long)p_json->allocation_id);
+
+  int length = snprintf(json, sizeof(json), "[{\"fecha\":\"20%02u-%02u-%02uT%02u:%02u:%02u\",\"idEvento\":%u,\"folio\":%s,\"nivel\":%u,\"temperatura\":%d,\"energia\":%u.%02u,\"abierto\":%u,\"clave\":%s,\"idUsuario\":%s,\"cantidad\":%s,\"tag\":%s%s}]",
+                        p_json->year, p_json->month, p_json->day, p_json->hour, p_json->minute, p_json->second, p_json->event, p_json->ticket_number, p_json->fuel_level, p_json->fuel_temp, p_json->int_battery_level, p_json->dec_battery_level, p_json->open,
+                        p_json->password, p_json->user_id, p_json->quantity_dispatched, p_json->tag, allocation_field);
+
   json[sizeof(json) - 1] = '\0';
+
+  // Recortado sería JSON inválido y el servidor rechazaría el lote donde se guarde.
+  if(length < 0 || length >= (int)sizeof(json))
+    logger.logln("El evento no cabe en MAX_EVENT_JSON_LENGTH.");
 
   // Si no se envía queda en /Eventos.txt; si se envía, lo tiene la plataforma.
   logger.debugln(json);
@@ -2895,6 +3038,8 @@ bool send_data(json_event_struct *p_json)
 
   if(!send)
     build_sd_info(EVENTS_PATH, json, SAVE_EVENT);
+  else if(p_json->allocation_id > 0)
+    confirm_consumption(p_json->allocation_id, parse_centiliters(p_json->quantity_dispatched));
 
   return send;
 }
@@ -2994,7 +3139,7 @@ bool update_data(const char *p_json, const char *p_endpoint)
  * @param p_password  Contraseña del usuario (opcional).
  * @param p_quantity  Cantidad despachada (opcional).
  */
-void trigger_event(json_event p_event, bool p_use_password, float p_quantity, bool p_use_tag)
+void trigger_event(json_event p_event, bool p_use_password, float p_quantity, bool p_use_tag, uint32_t p_allocation_id)
 {
   static_assert(sizeof(((json_event_struct *)nullptr)->tag) >= sizeof(str_tag),
                 "json_event_struct::tag debe poder guardar str_tag completo");
@@ -3020,6 +3165,7 @@ void trigger_event(json_event p_event, bool p_use_password, float p_quantity, bo
   json_struct.second = rtc_data[RTC_SECOND_INDEX];
   json_struct.event = p_event;
   json_struct.open = open_cabinet;
+  json_struct.allocation_id = p_allocation_id;
 
   if(p_event == FUEL_DISPATCHED)
     snprintf(json_struct.ticket_number, sizeof(json_struct.ticket_number), "\"%u\"", ticket_number);
@@ -3248,6 +3394,9 @@ void send_last_events()
     logger.log(n_events);
     logger.logln(" eventos enviados.");
 
+    // La plataforma ya sumó estos despachos a "consumidos" de su asignación.
+    confirm_batch_consumption(json);
+
     if(!erase_events(n_events))
       logger.logln("No se pudieron eliminar los eventos.");
   }
@@ -3305,6 +3454,9 @@ bool sync_platform_data()
   bool users_synced = sync_users();
   bool tags_synced = sync_tags();
 
+  // Si falla no se reintenta la descarga completa cada 5 min: sync_limits() la repite
+  // cada 30 min y con cada aviso, y mientras tanto se usan las de la SD.
+  sync_allocations();
   sync_product();
 
   return users_synced && tags_synced;
@@ -3525,15 +3677,24 @@ bool sync_tags()
     return false;
   }
 
+  // La plataforma ya restringe los tags al cliente de la API key; el filtro por cliente
+  // de abajo queda por si responde también los de otros clientes.
   char endpoint[64];
-  snprintf(endpoint, sizeof(endpoint), "%s?cliente=%u&listado=true", tags_endpoint, client_id);
+  snprintf(endpoint, sizeof(endpoint), "%s?listado=true&estatus=true", tags_endpoint);
 
   const char *json = platform_get(endpoint);
 
   if(!json)
     return false;
 
-  const char *cursor = parser.find_root_array(json, "data");
+  // La versión con límites regresa la lista en data.elementos; la anterior, en data.
+  const char *data = parser.find_root_value(json, "data");
+  const char *cursor = nullptr;
+
+  if(data && *data == '[')
+    cursor = data;
+  else if(data && *data == '{')
+    cursor = parser.find_root_array(data, "elementos");
 
   if(!cursor)
   {
@@ -3583,9 +3744,13 @@ bool sync_tags()
     if(parser.get_value_text(object, 0, "id", text, sizeof(text)))
       record.id = atoi(text);
 
+    // Sin el campo (versión anterior de la plataforma), el tag no tiene límite.
+    record.limited = parser.get_value_text(object, 0, "limite", text, sizeof(text), &is_null) && !is_null &&
+                     (strcmp(text, "true") == 0 || strcmp(text, "1") == 0);
+
     downloaded[count++] = record;
 
-    logger.debug("Tag registrado: ");
+    logger.debug(record.limited ? "Tag registrado con limite: " : "Tag registrado: ");
     logger.debugln(record.identifier);
   }
 
@@ -3798,6 +3963,7 @@ void save_tags_to_sd()
     file.print(tags[i].id);
     file.print(',');
     file.print(tags[i].identifier);
+    file.print(tags[i].limited ? ",1" : ",0");
     file.print("\r\n");
   }
 
@@ -3808,7 +3974,7 @@ void save_tags_to_sd()
   logger.logln(count);
 }
 
-tag_status_t find_tag(const char *p_tag, char *p_identifier, size_t p_identifier_size)
+tag_status_t find_tag(const char *p_tag, tag_record *p_record)
 {
   tag_status_t result = TAG_NOT_REGISTERED;
 
@@ -3822,8 +3988,7 @@ tag_status_t find_tag(const char *p_tag, char *p_identifier, size_t p_identifier
     {
       if(same_tag(p_tag, tags[i].identifier))
       {
-        strncpy(p_identifier, tags[i].identifier, p_identifier_size);
-        p_identifier[p_identifier_size - 1] = '\0';
+        *p_record = tags[i];
         result = TAG_REGISTERED;
         break;
       }
@@ -3833,6 +3998,328 @@ tag_status_t find_tag(const char *p_tag, char *p_identifier, size_t p_identifier
   xSemaphoreGive(lists_mutex);
 
   return result;
+}
+
+/**
+ * @brief Convierte una cantidad en litros ("37.5", "100", 35.20) a centésimas de litro.
+ * @return Centésimas de litro, o 0 si el texto no es un número.
+ */
+static int32_t parse_centiliters(const char *p_text)
+{
+  char *end = nullptr;
+  double liters = strtod(p_text, &end);
+
+  if(end == p_text)
+    return 0;
+
+  return (int32_t)llround(liters * 100.0);
+}
+
+/**
+ * @brief Convierte una fecha "AAAA-MM-DD" (o el inicio de "AAAA-MM-DDThh:mm...") a AAAAMMDD.
+ * @return La fecha como número, o 0 si no es válida.
+ */
+static uint32_t parse_date(const char *p_text)
+{
+  unsigned year = 0, month = 0, day = 0;
+
+  if(sscanf(p_text, "%4u-%2u-%2u", &year, &month, &day) != 3 || year < 2000 || month < 1 || month > 12 || day < 1 || day > 31)
+    return 0;
+
+  return year * 10000 + month * 100 + day;
+}
+
+/// Fecha del reloj del equipo como AAAAMMDD (hora local, como las fechas de la plataforma).
+static uint32_t today_date()
+{
+  return (2000 + rtc_data[RTC_YEAR_INDEX]) * 10000UL + rtc_data[RTC_MONTH_INDEX] * 100UL + rtc_data[RTC_DAY_INDEX];
+}
+
+bool sync_allocations()
+{
+  char endpoint[96];
+  snprintf(endpoint, sizeof(endpoint), "%s?dispositivo=%s&vigentes=true", allocations_endpoint, device_name);
+
+  const char *json = platform_get(endpoint);
+
+  if(!json)
+    return false;
+
+  const char *cursor = parser.find_root_array(json, "data");
+
+  if(!cursor)
+  {
+    logger.logln("Respuesta inesperada al descargar las asignaciones.");
+    return false;
+  }
+
+  static allocation_record downloaded[MAX_NUMBER_OF_ALLOCATIONS];
+  int count = 0;
+  const char *object;
+  size_t length;
+
+  while(parser.next_array_object(&cursor, &object, &length))
+  {
+    if(parser.parse_json(object, length) < 1)
+      continue;
+
+    allocation_record record = {};
+    char text[32];
+    bool is_null = false;
+
+    if(!parser.get_value_text(object, 0, "id", text, sizeof(text)) || (record.id = strtoul(text, nullptr, 10)) == 0)
+      continue;
+
+    // La plataforma solo manda las activas; una cancelada que llegue se descarta igual.
+    if(parser.get_value_text(object, 0, "estatus", text, sizeof(text), &is_null) && !is_null && (strcmp(text, "false") == 0 || strcmp(text, "0") == 0))
+      continue;
+
+    int tag_index = parser.json_find_key_in_object(object, 0, "tag");
+
+    if(tag_index > 0)
+    {
+      if(parser.get_value_text(object, tag_index, "id", text, sizeof(text)))
+        record.tag_id = atoi(text);
+
+      parser.get_value_text(object, tag_index, "identificador", record.identifier, sizeof(record.identifier));
+    }
+
+    if(record.tag_id <= 0 && record.identifier[0] == '\0')
+      continue;
+
+    if(parser.get_value_text(object, 0, "litros", text, sizeof(text)))
+      record.liters = parse_centiliters(text);
+
+    if(parser.get_value_text(object, 0, "consumidos", text, sizeof(text), &is_null) && !is_null)
+      record.consumed = parse_centiliters(text);
+
+    if(parser.get_value_text(object, 0, "fechaInicio", text, sizeof(text)))
+      record.start_date = parse_date(text);
+
+    if(parser.get_value_text(object, 0, "fechaFin", text, sizeof(text)))
+      record.end_date = parse_date(text);
+
+    if(record.start_date == 0 || record.end_date == 0)
+    {
+      logger.log("Asignacion ignorada por fechas invalidas: ");
+      logger.logln(record.id);
+      continue;
+    }
+
+    if(count >= MAX_NUMBER_OF_ALLOCATIONS)
+    {
+      logger.logln("Hay mas asignaciones que MAX_NUMBER_OF_ALLOCATIONS; se ignoran las demas.");
+      break;
+    }
+
+    downloaded[count++] = record;
+  }
+
+  xSemaphoreTake(lists_mutex, portMAX_DELAY);
+
+  // Lo despachado aquí que la plataforma no ha confirmado no viene en "consumidos":
+  // se conserva para la misma asignación.
+  for(int i = 0; i < count; i++)
+  {
+    for(int j = 0; j < number_of_allocations; j++)
+    {
+      if(allocations[j].id == downloaded[i].id)
+      {
+        downloaded[i].pending = allocations[j].pending;
+        break;
+      }
+    }
+  }
+
+  memcpy(allocations, downloaded, sizeof(allocation_record) * count);
+  number_of_allocations = count;
+  xSemaphoreGive(lists_mutex);
+
+  build_sd_info(ALLOCATIONS_PATH, "", SAVE_ALLOCATIONS_LIST);
+
+  logger.log("Asignaciones de litros: ");
+  logger.logln(count);
+  return true;
+}
+
+void sync_limits()
+{
+  sync_tags();
+  sync_allocations();
+}
+
+void config_allocations()
+{
+  number_of_allocations = 0;
+
+  File file = SD.open(ALLOCATIONS_PATH, FILE_READ);
+
+  if(!file)
+    return;
+
+  while(file.available() && number_of_allocations < MAX_NUMBER_OF_ALLOCATIONS)
+  {
+    // "id,tag_id,litros,consumidos,pendientes,inicio,fin,identificador" (litros en centésimas).
+    String line = file.readStringUntil('\n');
+    line.trim();
+
+    allocation_record record = {};
+    unsigned long id = 0, start = 0, end = 0;
+    long liters = 0, consumed = 0, pending = 0;
+    int consumed_chars = 0;
+
+    if(sscanf(line.c_str(), "%lu,%d,%ld,%ld,%ld,%lu,%lu,%n", &id, &record.tag_id, &liters, &consumed, &pending, &start, &end, &consumed_chars) != 7 || id == 0)
+      continue;
+
+    record.id = id;
+    record.liters = liters;
+    record.consumed = consumed;
+    record.pending = pending;
+    record.start_date = start;
+    record.end_date = end;
+    strncpy(record.identifier, line.c_str() + consumed_chars, sizeof(record.identifier));
+    record.identifier[sizeof(record.identifier) - 1] = '\0';
+
+    allocations[number_of_allocations++] = record;
+  }
+
+  file.close();
+
+  logger.log("Asignaciones cargadas de la SD: ");
+  logger.logln(number_of_allocations);
+}
+
+void save_allocations_to_sd()
+{
+  File file = SD.open(ALLOCATIONS_PATH, FILE_WRITE);
+
+  if(!file)
+  {
+    logger.logln("No se pudieron guardar las asignaciones.");
+    return;
+  }
+
+  xSemaphoreTake(lists_mutex, portMAX_DELAY);
+
+  for(int i = 0; i < number_of_allocations; i++)
+  {
+    const allocation_record *a = &allocations[i];
+    char line[128];
+    snprintf(line, sizeof(line), "%lu,%d,%ld,%ld,%ld,%lu,%lu,%s\r\n", (unsigned long)a->id, a->tag_id, (long)a->liters,
+             (long)a->consumed, (long)a->pending, (unsigned long)a->start_date, (unsigned long)a->end_date, a->identifier);
+    file.print(line);
+  }
+
+  xSemaphoreGive(lists_mutex);
+  file.close();
+}
+
+tag_status_t check_allocation(const tag_record *p_tag, uint32_t *p_allocation_id, float *p_liters)
+{
+  *p_allocation_id = 0;
+  *p_liters = -1.0f;
+
+  if(!p_tag->limited)
+    return TAG_REGISTERED;
+
+  uint32_t today = today_date();
+  tag_status_t result = TAG_NO_ALLOCATION;
+
+  xSemaphoreTake(lists_mutex, portMAX_DELAY);
+
+  for(int i = 0; i < number_of_allocations; i++)
+  {
+    const allocation_record *a = &allocations[i];
+    bool same = (a->tag_id > 0 && p_tag->id > 0) ? a->tag_id == p_tag->id : same_tag(a->identifier, p_tag->identifier);
+
+    // Ambas fechas cuentan. La plataforma no deja dos asignaciones traslapadas del mismo
+    // tag, así que la que contiene hoy es la única que aplica.
+    if(!same || today < a->start_date || today > a->end_date)
+      continue;
+
+    int32_t balance = a->liters - a->consumed - a->pending;
+
+    if(balance > 0)
+    {
+      *p_allocation_id = a->id;
+      *p_liters = balance / 100.0f;
+      result = TAG_REGISTERED;
+    }
+    else
+      result = TAG_NO_BALANCE;
+
+    break;
+  }
+
+  xSemaphoreGive(lists_mutex);
+
+  return result;
+}
+
+/// Suma (o resta, con p_centiliters negativo) al consumo local de una asignación y lo guarda.
+static void change_pending_consumption(uint32_t p_allocation_id, int32_t p_centiliters)
+{
+  bool found = false;
+
+  xSemaphoreTake(lists_mutex, portMAX_DELAY);
+
+  for(int i = 0; i < number_of_allocations; i++)
+  {
+    if(allocations[i].id == p_allocation_id)
+    {
+      int32_t pending = allocations[i].pending + p_centiliters;
+      allocations[i].pending = pending > 0 ? pending : 0;
+      found = true;
+      break;
+    }
+  }
+
+  xSemaphoreGive(lists_mutex);
+
+  // Se guarda en cada despacho: un reinicio no debe regresarle litros al tag.
+  if(found)
+    build_sd_info(ALLOCATIONS_PATH, "", SAVE_ALLOCATIONS_LIST);
+}
+
+void add_pending_consumption(uint32_t p_allocation_id, int32_t p_centiliters)
+{
+  change_pending_consumption(p_allocation_id, p_centiliters);
+}
+
+void confirm_consumption(uint32_t p_allocation_id, int32_t p_centiliters)
+{
+  change_pending_consumption(p_allocation_id, -p_centiliters);
+}
+
+/**
+ * @brief Marca como confirmado el consumo de los despachos de un lote ya aceptado (201).
+ * @param p_json Lote JSON enviado: uno o varios eventos con "idAsignacion" y "cantidad".
+ */
+static void confirm_batch_consumption(const char *p_json)
+{
+  static const char *allocation_key = "\"idAsignacion\":";
+  static const char *quantity_key = "\"cantidad\":";
+
+  // Cada evento es un objeto plano: se recorre de "{" en "{".
+  for(const char *event = strchr(p_json, '{'); event; event = strchr(event + 1, '{'))
+  {
+    const char *event_end = strchr(event, '}');
+
+    if(!event_end)
+      break;
+
+    const char *allocation = strstr(event, allocation_key);
+    const char *quantity = strstr(event, quantity_key);
+
+    if(!allocation || !quantity || allocation > event_end || quantity > event_end)
+      continue;
+
+    uint32_t allocation_id = strtoul(allocation + strlen(allocation_key), nullptr, 10);
+    int32_t centiliters = parse_centiliters(quantity + strlen(quantity_key));
+
+    if(allocation_id > 0 && centiliters > 0)
+      confirm_consumption(allocation_id, centiliters);
+  }
 }
 
 /**
@@ -4610,7 +5097,62 @@ void update_firmware(const char *p_payload)
 
 void device_connected(const char *p_payload)
 {
-  
+
+}
+
+void allocation_updated(const char *p_payload)
+{
+  // Corre en Websocket_Task con http_mutex tomado: la descarga la hace HTTP_Task.
+  limits_sync_requested = true;
+}
+
+void api_key_updated(const char *p_payload)
+{
+  // No se usa el parser global: HTTP_Task puede estar usándolo con otra respuesta.
+  const char *value = strstr(p_payload, "\"apikey\"");
+  value = value ? strchr(value + 8, ':') : nullptr;
+  value = value ? strchr(value, '"') : nullptr;
+  const char *end = value ? strchr(value + 1, '"') : nullptr;
+
+  if(!value || !end)
+  {
+    logger.logln("Evento apiKey sin llave.");
+    return;
+  }
+
+  value++;
+  size_t length = end - value;
+
+  // Formato <idCliente>:<apikey>, con la llave en hexadecimal.
+  size_t digits = 0;
+
+  while(digits < length && isdigit((unsigned char)value[digits]))
+    digits++;
+
+  bool valid = digits > 0 && digits < length && value[digits] == ':' && length - digits - 1 >= 16 && length < sizeof(api_key);
+
+  for(size_t i = digits + 1; valid && i < length; i++)
+    valid = isxdigit((unsigned char)value[i]);
+
+  if(!valid)
+  {
+    logger.logln("Evento apiKey con una llave invalida: se ignora.");
+    return;
+  }
+
+  // Corre con http_mutex tomado, y las peticiones leen api_key con el mismo mutex.
+  memcpy(api_key, value, length);
+  api_key[length] = '\0';
+
+  // read_api_key() espera una sola línea terminada en salto de línea, y restaura el
+  // respaldo si no la encuentra: se escriben los dos archivos.
+  char line[sizeof(api_key) + 2];
+  snprintf(line, sizeof(line), "%s\n", api_key);
+  build_sd_info(API_KEY_PATH, line, SAVE_FILE);
+  build_sd_info(API_KEY_BACKUP_PATH, line, SAVE_FILE);
+
+  logger.log("API key actualizada desde la plataforma para el cliente ");
+  logger.logln(strtoul(api_key, nullptr, 10));
 }
 
 /**

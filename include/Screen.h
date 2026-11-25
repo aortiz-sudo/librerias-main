@@ -170,6 +170,8 @@ class Screen : public I2C_Master_Device
         {
             this->m_tag_detected = false;
             this->m_tag_message = nullptr;
+            this->m_tag_allocation_id = 0;
+            this->m_tag_allowance = -1.0f;
             this->m_tag_session++;
             this->m_tag_reading = true;
         }
@@ -183,6 +185,44 @@ class Screen : public I2C_Master_Device
             this->m_tag_session++;
             this->m_tag_detected = false;
             this->m_tag_message = nullptr;
+            this->m_tag_allocation_id = 0;
+            this->m_tag_allowance = -1.0f;
+        }
+
+        /**
+         * \brief               Fija la asignación de litros del tag que va a iniciar el despacho.
+         * \details             Se llama antes de reportar el tag como detectado, para que la
+         *                      pantalla ya tenga el saldo cuando arranca. Se ignora si la
+         *                      sesión ya no es la actual.
+         * \param p_session     Sesión en la que se leyó el tag (get_tag_session()).
+         * \param p_allocation_id Id de la asignación que se aplica, o 0 si el tag no tiene límite.
+         * \param p_liters      Litros disponibles, o un valor negativo si el tag no tiene límite.
+         */
+        inline void set_tag_allowance(const uint8_t p_session, const uint32_t p_allocation_id, const float p_liters)
+        {
+            if(!this->m_tag_reading || p_session != this->m_tag_session)
+                return;
+
+            this->m_tag_allocation_id = p_allocation_id;
+            this->m_tag_allowance = p_liters;
+        }
+
+        /**
+         * \brief   Asignación de litros del despacho en curso.
+         * \returns Id de la asignación, o 0 si el tag no tiene límite.
+         */
+        inline uint32_t get_tag_allocation_id() const
+        {
+            return this->m_tag_allocation_id;
+        }
+
+        /**
+         * \brief   Litros que le quedaban al tag al iniciar el despacho.
+         * \returns Litros disponibles, o un valor negativo si el tag no tiene límite.
+         */
+        inline float get_tag_allowance() const
+        {
+            return this->m_tag_allowance;
         }
 
         /**
@@ -473,6 +513,8 @@ class Screen : public I2C_Master_Device
         volatile bool m_tag_message_changed = false;  ///< Indica si el estado del tag cambió.
         volatile bool m_tag_reading = false;          ///< La pantalla de despacho pidió leer el tag.
         volatile uint8_t m_tag_session = 0;           ///< Sesión de lectura del tag.
+        volatile uint32_t m_tag_allocation_id = 0;    ///< Asignación de litros del tag leído (0: sin límite).
+        volatile float m_tag_allowance = -1.0f;       ///< Litros disponibles del tag leído (negativo: sin límite).
         bool m_cabinet_state = false;                 ///< Estado del gabinete.
         float m_price = 0.0;                          ///< Precio actual.
         uint8_t m_brightness = 100;                   ///< Brillo actual.

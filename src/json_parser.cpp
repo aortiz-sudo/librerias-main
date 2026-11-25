@@ -73,6 +73,13 @@ const char *JSON_Parser::skip_string(const char *p_quote)
 
 const char *JSON_Parser::find_root_array(const char *p_json, const char *p_key)
 {
+    const char *value = find_root_value(p_json, p_key);
+
+    return (value && *value == '[') ? value : nullptr;
+}
+
+const char *JSON_Parser::find_root_value(const char *p_json, const char *p_key)
+{
     if(!p_json || !p_key)
         return nullptr;
 
@@ -108,7 +115,7 @@ const char *JSON_Parser::find_root_array(const char *p_json, const char *p_key)
             while(isspace((unsigned char)*value))
                 value++;
 
-            return *value == '[' ? value : nullptr;
+            return *value ? value : nullptr;
         }
 
         if(*p == '{' || *p == '[')

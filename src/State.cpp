@@ -506,12 +506,42 @@ void dispatch_state::write_message(const char *p_message)
     this->m_device->write_to_address(DISPLAY_TAG_MESSAGE_ADDRESS, (uint8_t *)p_message, strlen(p_message));
 }
 
+void dispatch_state::set_balance_message(float p_liters)
+{
+    // Se rellena con espacios para borrar lo que hubiera en el campo de 17 caracteres.
+    int length = snprintf(this->m_balance_message, sizeof(this->m_balance_message), "Saldo %.2f L", p_liters);
+
+    for(int i = (length < 0) ? 0 : length; i < (int)sizeof(this->m_balance_message) - 1; i++)
+        this->m_balance_message[i] = ' ';
+
+    this->m_balance_message[sizeof(this->m_balance_message) - 1] = '\0';
+}
+
+void dispatch_state::begin_dispatch()
+{
+    // Un tag con límite trae su saldo (allowance >= 0). Por cantidad, lo escrito ya se
+    // recortó al saldo; en despacho libre, el saldo es hasta donde se despacha.
+    float allowance = this->m_device->get_tag_allowance();
+    bool limited = allowance >= 0.0f;
+
+    this->m_has_target = m_quantity_dispatch || limited;
+    this->m_target = m_quantity_dispatch ? m_volume : allowance;
+    this->m_show_balance = !m_quantity_dispatch && limited;
+    this->m_confirm_pending = false;
+
+    if(this->m_show_balance)
+        set_balance_message(allowance);
+
+    dispatch_initialized = true;
+    run_dispatch();
+}
+
 void dispatch_state::run_dispatch()
 {
     this->m_counter = 1;
     this->m_device->set_dispatching(true);
     this->m_state_callback_function((uint8_t *)&m_dispatched_volume, 0);
-    write_message(this->m_clear_tag_message);
+    write_message(this->m_show_balance ? this->m_balance_message : this->m_clear_tag_message);
 }
 
 void dispatch_state::pause_dispatch()
@@ -555,10 +585,36 @@ void dispatch_state::screen(char p_key)
                     write_message(this->m_reading_tag_message);
                 }
             }
+            else if(this->m_confirm_pending)
+            {
+                // La cantidad escrita pasaba del saldo del tag y se recortó: no arranca hasta
+                // que el despachador ve el saldo y vuelve a presionar "iniciar".
+                if(tag_changed)
+                    write_message(tag_detected ? this->m_balance_message : this->m_no_tag_message);
+
+                if(p_key == ENTER)
+                {
+                    if(tag_detected)
+                        begin_dispatch();
+                    else
+                        write_message(this->m_no_tag_message);
+                }
+            }
             else if(tag_detected)
             {
-                dispatch_initialized = true;
-                run_dispatch();
+                float allowance = this->m_device->get_tag_allowance();
+
+                if(m_quantity_dispatch && allowance >= 0.0f && m_volume > allowance)
+                {
+                    m_volume = allowance;
+                    this->m_confirm_pending = true;
+                    set_balance_message(allowance);
+                    write_message(this->m_balance_message);
+                }
+                else
+                {
+                    begin_dispatch();
+                }
             }
             else if(tag_changed)
             {
@@ -638,8 +694,8 @@ void dispatch_state::screen(char p_key)
         this->m_device->write_to_address(DISPLAY_DISPATCHED_COST_ADDRESS, (uint8_t *)&int_dispatched_cost, sizeof(uint32_t), true);
     }
 
-    // Despacho por cantidad: finalizar automáticamente al alcanzar el objetivo
-    if(m_dispatched_volume >= m_volume && m_quantity_dispatch && this->m_counter == 1)
+    // Finalizar automáticamente al llegar a la cantidad escrita o al saldo del tag
+    if(this->m_has_target && m_dispatched_volume >= this->m_target && this->m_counter == 1)
     {
         this->m_device->set_dispatching(false);
         this->m_state_callback_function((uint8_t *)&m_dispatched_volume, 1);
@@ -655,6 +711,10 @@ void dispatch_state::screen(char p_key)
 void dispatch_state::reset()
 {
     dispatch_initialized = false;
+    this->m_has_target = false;
+    this->m_target = 0.0f;
+    this->m_confirm_pending = false;
+    this->m_show_balance = false;
     this->m_counter = 0;
     m_dispatched_volume = 0.0;
     m_dispatched_cost = 0.0;

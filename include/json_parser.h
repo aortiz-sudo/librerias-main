@@ -87,6 +87,7 @@ typedef struct
     // salía con el contenido del evento siguiente, o vacío ("clave":, = JSON inválido).
     char password[8];               ///< Clave entre comillas ("1234") o null.
     char tag[26];                   ///< Tag RFID entre comillas o null (mismo tamaño que str_tag).
+    uint32_t allocation_id;         ///< Asignación de litros que se aplicó al despacho, o 0 (null).
 } json_event_struct;
 
 /**
@@ -230,6 +231,17 @@ class JSON_Parser
          * \returns         Puntero al '[' del arreglo, o nullptr si no existe.
          */
         static const char *find_root_array(const char *p_json, const char *p_key);
+
+        /**
+         * \brief           Busca, sin tokenizar el documento, el valor de una clave del objeto raíz.
+         * \details         Igual que find_root_array(), pero el valor puede ser de cualquier tipo.
+         *                  Si es un objeto, se puede volver a llamar con el puntero que regresa
+         *                  para buscar una clave dentro de él (p. ej. "data" y luego "elementos").
+         * \param p_json    Cadena JSON terminada en nulo.
+         * \param p_key     Clave del objeto raíz.
+         * \returns         Puntero al primer carácter del valor, o nullptr si no existe.
+         */
+        static const char *find_root_value(const char *p_json, const char *p_key);
 
         /**
          * \brief           Obtiene el siguiente objeto de un arreglo.

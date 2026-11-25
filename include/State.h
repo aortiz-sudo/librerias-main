@@ -533,6 +533,18 @@ class dispatch_state : public State
         void write_message(const char *p_message);
 
         /**
+         * \brief Arranca el despacho con el tag ya validado: fija hasta dónde se despacha
+         *        (la cantidad escrita o el saldo del tag) y enciende los relés.
+         */
+        void begin_dispatch();
+
+        /**
+         * \brief           Prepara el mensaje "Saldo X L" con los litros disponibles del tag.
+         * \param p_liters  Litros disponibles.
+         */
+        void set_balance_message(float p_liters);
+
+        /**
          * \brief Arranca o reanuda el despacho: enciende los relés (pantalla 19).
          */
         void run_dispatch();
@@ -548,6 +560,11 @@ class dispatch_state : public State
         void finish_dispatch();
 
         bool dispatch_initialized = false;
+        bool m_has_target = false;          ///< El despacho se detiene solo al llegar a m_target.
+        float m_target = 0.0f;              ///< Litros a los que se detiene: la cantidad escrita o el saldo del tag.
+        bool m_confirm_pending = false;     ///< La cantidad se recortó al saldo del tag: se espera "iniciar" otra vez.
+        bool m_show_balance = false;        ///< Despacho libre de un tag con límite: el saldo queda a la vista.
+        char m_balance_message[18] = "";    ///< "Saldo X L" (17 caracteres).
         const char *m_clear_tag_message = "                 ";   ///< Texto para borrar el mensaje del tag.
         const char *m_reading_tag_message = "Leyendo tag      "; ///< Mensaje mientras se espera el tag para iniciar.
         const char *m_tag_found_message = "Tag detectado    ";   ///< Mensaje en pausa cuando se vuelve a leer el tag.
