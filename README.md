@@ -234,7 +234,7 @@ Códigos de estado: `1` tamaño inválido, `2` dirección inválida, `3` fallo d
 - **Con app válida**, después de cada reinicio el bootloader espera **1 s** a que el ESP32 empiece a flashear (`burn_firmware()` lo busca 20 ms después de mandar el reinicio) y luego arranca la app. La arranca con un reinicio por watchdog y una marca en RAM (`.noinit`), no con un salto directo: así la app empieza con todos los periféricos en su estado de reset. Con el salto directo, la app del display no arrancaba.
 - **Sin app** (flasheo cortado, o recién grabado por ISP), el bootloader no la arranca y espera al ESP32. Con la pantalla en reposo, el ESP32 revisa cada 60 s (hasta 3 veces por arranque) si algún ATmega responde `7`. Si es así, lo flashea con el binario de `/firmwares/`.
 - Si el ESP32 deja de mandar a mitad del flasheo, a los 10 s el bootloader se reinicia y espera sin app.
-- La app del display se reinicia sola por su watchdog si pasa ~1 s sin transmitir a la pantalla. Cada uno de esos reinicios la deja ~1 s sin responder (la ventana del bootloader).
+- Desde la 1.1.1, la app del display alimenta su watchdog (1 s) en el ciclo principal: solo se reinicia si se cuelga. Hasta la 1.1.0 lo alimentaba la transmisión a la pantalla, así que se reiniciaba cada vez que pasaba ~1 s sin transmitir (mientras el ESP32 arrancaba, por ejemplo), y cada reinicio la dejaba ~1 s sin responder (la ventana del bootloader). También desde la 1.1.1, la app del display ignora las escrituras I2C sin datos; la de la impresora todavía las ejecuta como si repitieran el último comando, por eso el escaneo del bus en `setup()` se salta `0x30` y `0x31`.
 
 **Grabarlo por ISP (USBasp), una sola vez por ATmega:**
 

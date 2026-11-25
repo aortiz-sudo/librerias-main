@@ -15,7 +15,7 @@
  * \def     FIRMWARE_VERSION
  * \brief   Versión del firmware para la pantalla.
 */
-#define FIRMWARE_VERSION "1.0.0"  ///< Versión del firmware.
+#define FIRMWARE_VERSION "1.1.1"  ///< Versión del firmware.
 /**
  * \def     PORT_DISPLAY
  * \brief   Puerto serie utilizado para la pantalla principal.

@@ -7,6 +7,7 @@
  */
 
 #include "mainDisplay.h"
+#include <avr/wdt.h>
 
 Display *display;                   ///< Puntero al objeto de la pantalla.
 Display_Builder display_builder;    ///< Constructor del objeto de la pantalla.
@@ -60,8 +61,6 @@ void I2C_RxHandler(int args);
 void execute_I2C_command(const uint8_t *p_data);
 /** @brief Configura el watchdog timer del sistema. */
 void configure_wdt();
-/** @brief Habilita la interrupción de transmisión UART. */
-void enable_tx_interrupt();
 /** @brief Construye e inicializa el objeto de la pantalla. */
 void build_display();
 
@@ -73,7 +72,6 @@ void setup()
   configure_wdt();
   Wire.begin(I2C_SLAVE_ADDR);
   build_display();
-  enable_tx_interrupt();
   Wire.onReceive(I2C_RxHandler);
 }
 
@@ -82,8 +80,14 @@ void setup()
  */
 void loop()
 {
+  // El watchdog solo debe reiniciar si este ciclo se cuelga (ver configure_wdt()).
+  // También se alimenta por comando: si el ESP32 llena la cola al ritmo al que se
+  // vacía, el while no termina y la app sigue sana.
+  wdt_reset();
+
   while(cmd_queue_tail != cmd_queue_head)
   {
+    wdt_reset();
     const uint8_t *cmd_data = cmd_queue[cmd_queue_tail].data;
     execute_I2C_command(cmd_data);
     cmd_queue_tail = (cmd_queue_tail + 1) % CMD_QUEUE_SIZE;
@@ -107,6 +111,12 @@ void I2C_RxHandler(int p_length)
     cmd_queue[cmd_queue_head].data[count] = Wire.read();
     count++;
   }
+
+  // Una escritura sin datos (un sondeo de dirección) no es un comando. Antes se encolaba
+  // igual y se ejecutaba con lo que quedara en ese lugar de la cola; 0x00 es el reinicio.
+  if(count == 0)
+    return;
+
   cmd_queue[cmd_queue_head].length = count;
   cmd_queue_head = next_head;
 }
@@ -190,33 +200,13 @@ void build_display()
     display = (Display *)display_builder.get_device();
 }
 
+// Watchdog de 1 s alimentado en loop(): reinicia solo si la app se cuelga.
+// Antes no se llamaba nunca a wdt_reset(); lo "alimentaba" la interrupción de fin de
+// transmisión del UART, así que la app se reiniciaba cada vez que pasaba ~1 s sin mandar
+// nada a la pantalla (mientras el ESP32 arrancaba, flasheaba la impresora o la página no
+// cambiaba). Con el bootloader, cada reinicio deja la pantalla ~1 s sin responder.
 void configure_wdt()
 {
-  cli();
   MCUSR &= ~(1 << WDRF);
-  WDTCSR = 0x00;
-  WDTCSR |= (1 << WDCE) | (1 << WDE);
-  // WDP2|WDP1 = 1 s (interrupt) / 2 s (reset total).
-  // Margen sobre los 500 ms de show_variables y operaciones puntuales.
-  WDTCSR = (1 << WDE) | (1 << WDP2) | (1 << WDP1);
-  sei();
-}
-
-void enable_tx_interrupt()
-{
-  UCSR0B |= (1 << TXCIE0);
-}
-
-ISR(WDT_vect)
-{
-
-}
-
-#if defined(__AVR_ATMEGA328P__)
-  ISR(USART_TX_vect)
-#else
-  ISR(USART0_TX_vect)
-#endif
-{
-  WDTCSR |= (1 << WDIE);
+  wdt_enable(WDTO_1S);
 }
