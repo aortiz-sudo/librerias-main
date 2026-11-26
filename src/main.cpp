@@ -480,6 +480,8 @@ void read_api_key();
 void read_ca_cert();
 /** @brief Carga los parámetros de GitHub (token y versiones de firmware) desde la SD. */
 void config_github();
+/** @brief Lee el sensor del gabinete con antirrebote y lo pasa a la pantalla. */
+void read_cabinet();
 /** @brief Lee y escribe el estado de las entradas y salidas del sistema. */
 void read_write_ios();
 /** @brief Controla el estado de los relevadores. @param p_relay_states Arreglo con el estado de cada relevador. */
@@ -2232,16 +2234,46 @@ void config_github()
 }
 
 /**
+ * @brief Lee el sensor del gabinete y lo pasa a la pantalla.
+ *
+ * El estado cambia cuando el pin sostiene el nuevo nivel CABINET_DEBOUNCE_MS, para que
+ * un rebote del contacto o ruido en el cable no detengan el despacho ni manden el evento.
+ * Con el gabinete abierto y sin el puente de calibración (Screen::cabinet_locked()), los
+ * menús bloquean la sesión, el login no deja entrar, y el despacho se detiene y solo se
+ * puede terminar. events() manda el evento OPEN_CABINET al abrirse.
+ */
+void read_cabinet()
+{
+  static bool last_level_open = false;
+  static unsigned long last_change = 0;
+
+  bool level_open = digitalRead(CABINET_PIN) == CABINET_OPEN_STATE;
+  unsigned long now = millis();
+
+  if(level_open != last_level_open)
+  {
+    last_level_open = level_open;
+    last_change = now;
+  }
+  else if(level_open != open_cabinet && now - last_change >= CABINET_DEBOUNCE_MS)
+  {
+    open_cabinet = level_open;
+    logger.logln(open_cabinet ? "Gabinete abierto." : "Gabinete cerrado.");
+  }
+
+  screen->set_cabinet_state(open_cabinet);
+}
+
+/**
  * @brief Lee y escribe en los pines de entrada/salida del sistema.
- * 
+ *
  * Esta función se encarga de leer el estado de los pines configurados como entrada y
  * escribir en aquellos configurados como salida. Controla el estado del relé según
  * el modo de operación (despacho o calibración).
  */
 void read_write_ios()
 {
-  open_cabinet = false;
-  screen->set_cabinet_state(open_cabinet);
+  read_cabinet();
 
   bool was_open = dispatching || calibrating;
   bool now_dispatching = screen->get_dispatching();

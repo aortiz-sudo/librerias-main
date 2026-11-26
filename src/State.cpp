@@ -101,17 +101,48 @@ void login_state::draw()
     logger.debugln("PANTALLA LOGIN\r\nIntroduzca la contraseña");
     this->m_device->change_pic();
     this->m_device->write_to_address(DISPLAY_PASSWORD_ADDRESS, (uint8_t *)this->m_password_text, sizeof(this->m_password_text) - 1);
+    this->m_cabinet_notice = false;   // Si el gabinete está abierto, screen() lo avisa en la primera pasada.
+}
+
+void login_state::write_notice(const char *p_message)
+{
+    char field[DISPLAY_WRONG_PASS_TEXT_LENGTH];
+    size_t length = p_message ? strnlen(p_message, sizeof(field)) : 0;
+
+    if(length > 0)
+        memcpy(field, p_message, length);
+
+    memset(field + length, ' ', sizeof(field) - length);
+    this->m_device->write_to_address(DISPLAY_WRONG_PASS_ADDRESS, (uint8_t *)field, sizeof(field));
 }
 
 void login_state::screen(char p_key)
 {
     this->m_next_state = this->m_device->get_calibration_pin_state() ? MENU_CAL_SCREEN_STATE : MENU_SCREEN_STATE;
-    
-    if(p_key)
+
+    // Con el gabinete abierto (sin el puente de calibración) no se puede iniciar sesión:
+    // se avisa en el renglón de "Clave invalida" y se descarta lo tecleado hasta que se
+    // cierre. Solo se puede regresar a la pantalla inicial.
+    bool cabinet_locked = this->m_device->cabinet_locked();
+
+    if(cabinet_locked != this->m_cabinet_notice)
     {
-        const char *text = "                      ";
-        this->m_device->write_to_address(DISPLAY_WRONG_PASS_ADDRESS, (uint8_t *)text, strlen(text));
+        this->m_cabinet_notice = cabinet_locked;
+        write_notice(cabinet_locked ? this->m_cabinet_message : nullptr);
+
+        if(cabinet_locked)
+            reset();
     }
+
+    if(cabinet_locked)
+    {
+        if(p_key == BACK || p_key == LOCK)
+            handle_special_key(p_key);
+        return;
+    }
+
+    if(p_key)
+        write_notice(nullptr);
 
     if(isDigit(p_key) && m_digit_counter < m_max_counter)
     {
@@ -496,7 +527,15 @@ void dispatch_state::draw()
     // texto muestra el producto.
     this->m_device->set_dispatching(false);
     this->m_counter = 0;
+    this->m_cabinet_open = false;
+    this->m_cabinet_stop = false;
     write_message(nullptr);
+}
+
+void dispatch_state::lock_session()
+{
+    logger.logln("Sesion bloqueada por el gabinete.");
+    this->m_device->set_transition(true, INITIAL_SCREEN_STATE);
 }
 
 void dispatch_state::write_message(const char *p_message)
@@ -570,11 +609,34 @@ void dispatch_state::screen(char p_key)
     bool tag_changed = this->m_device->tag_message_changed();
     bool tag_detected = this->m_device->get_tag_detected();
 
+    // Gabinete abierto (sin el puente de calibración). Antes de despachar se bloquea la
+    // sesión, como en los menús. Despachando o en pausa, el despacho se detiene y ya solo
+    // se puede terminar: ticket, evento y se bloquea la sesión. Se revisa antes de atender
+    // la tecla, para que no se arranque ni se reanude en la misma pasada.
+    bool cabinet_open = this->m_device->cabinet_locked();
+    bool cabinet_changed = cabinet_open != this->m_cabinet_open;
+    this->m_cabinet_open = cabinet_open;
+
+    if(cabinet_open && !this->m_cabinet_stop && (this->m_counter == 1 || this->m_counter == 2))
+    {
+        if(this->m_counter == 1)
+            pause_dispatch();
+
+        this->m_cabinet_stop = true;
+        cabinet_changed = false;
+        write_message(this->m_cabinet_message);
+        logger.logln("Gabinete abierto: despacho detenido, solo se puede terminar.");
+    }
+
     switch(this->m_counter)
     {
         case 0: // 0x12 - PRESS_TO_START: iniciar o salir
         {
-            if(p_key == BACK)
+            if(cabinet_open)
+            {
+                lock_session();
+            }
+            else if(p_key == BACK)
             {
                 this->m_device->set_transition(true, DISPATCH_MENU_SCREEN_STATE);
             }
@@ -646,6 +708,26 @@ void dispatch_state::screen(char p_key)
 
         case 2: // 0x14 - DISPATCHING_IDLE (pausado): reanudar o terminar
         {
+            if(this->m_cabinet_stop)
+            {
+                // Se abrió el gabinete: ya no se reanuda, aunque se cierre. Al terminar se
+                // imprime el ticket con lo despachado y se bloquea la sesión.
+                if(p_key == BACK)
+                {
+                    finish_dispatch();
+                    lock_session();
+                }
+                else if(p_key == ENTER)
+                {
+                    write_message(this->m_finish_only_message);
+                }
+                else if(cabinet_changed)
+                {
+                    write_message(cabinet_open ? this->m_cabinet_message : this->m_finish_only_message);
+                }
+                break;
+            }
+
             if(tag_changed)
                 write_message(tag_detected ? this->m_tag_found_message : this->m_no_tag_message);
 
@@ -666,19 +748,11 @@ void dispatch_state::screen(char p_key)
 
         case 3: // 0x15 - DISPATCHING_FINISH: salir
         {
-            if(p_key == BACK)
+            if(cabinet_open)
+                lock_session();
+            else if(p_key == BACK)
                 this->m_device->set_transition(true, DISPATCH_MENU_SCREEN_STATE);
             break;
-        }
-    }
-
-    // Seguridad: pausar automáticamente si se abre el gabinete durante despacho
-    if(this->m_counter == 1 && !this->m_device->get_calibration_pin_state())
-    {
-        if(OPENED_CABINET)
-        {
-            pause_dispatch();
-            write_message("Cerrar gabinete");
         }
     }
 
@@ -714,6 +788,8 @@ void dispatch_state::reset()
     this->m_target = 0.0f;
     this->m_confirm_pending = false;
     this->m_show_balance = false;
+    this->m_cabinet_open = false;
+    this->m_cabinet_stop = false;
     this->m_counter = 0;
     m_dispatched_volume = 0.0;
     m_dispatched_cost = 0.0;

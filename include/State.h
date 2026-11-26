@@ -294,9 +294,19 @@ class login_state : public State
         void reset() override;
     
     private:
+        /**
+         * \brief           Escribe un aviso en el renglón de "Clave invalida", rellenado con
+         *                  espacios para borrar el anterior.
+         * \param p_message Aviso (hasta DISPLAY_WRONG_PASS_TEXT_LENGTH caracteres), o nullptr
+         *                  para borrarlo.
+         */
+        void write_notice(const char *p_message);
+
         char m_keypad_buffer[5] = {'\0', '\0', '\0', '\0', '\0'}; ///< Buffer para entrada de teclado.
         char m_password_text[5] = { ' ', ' ', ' ', ' ', '\0' };   ///< Buffer para mostrar contraseña.
         uint8_t m_digit_counter = 0;                              ///< Contador de dígitos ingresados.
+        bool m_cabinet_notice = false;                            ///< Se muestra el aviso del gabinete: no se inicia sesión.
+        const char *m_cabinet_message = "Gabinete abierto";       ///< Aviso con el gabinete abierto.
 };
 
 /**
@@ -561,6 +571,12 @@ class dispatch_state : public State
          */
         void finish_dispatch();
 
+        /**
+         * \brief Bloquea la sesión por el gabinete: pasa a la pantalla inicial, y el login no
+         *        deja entrar mientras siga abierto.
+         */
+        void lock_session();
+
         bool dispatch_initialized = false;
         bool m_has_target = false;          ///< El despacho se detiene solo al llegar a m_target.
         float m_target = 0.0f;              ///< Litros a los que se detiene: la cantidad escrita o el saldo del tag.
@@ -569,6 +585,10 @@ class dispatch_state : public State
         char m_balance_message[DISPLAY_MESSAGE_LENGTH + 1] = "";  ///< "Saldo X L".
         const char *m_reading_tag_message = "Leyendo tag";        ///< Mensaje mientras se espera el tag para iniciar.
         const char *m_tag_found_message = "Tag detectado";        ///< Mensaje en pausa cuando se vuelve a leer el tag.
+        const char *m_cabinet_message = "Cerrar gabinete";        ///< Mensaje con el gabinete abierto.
+        const char *m_finish_only_message = "Solo terminar";      ///< Mensaje si se intenta reanudar tras abrir el gabinete.
+        bool m_cabinet_open = false;        ///< Gabinete abierto en la pasada anterior, para avisar solo al cambiar.
+        bool m_cabinet_stop = false;        ///< Se abrió el gabinete en el despacho: ya solo se puede terminar.
 };
 
 /**

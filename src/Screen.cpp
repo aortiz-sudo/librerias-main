@@ -96,7 +96,23 @@ status Screen::update(char p_key)
     if(p_key)
         display_touch(10, 10, TOUCH);
 
-    this->m_current_state->screen(p_key);
+    // Gabinete abierto: en los menús se bloquea la sesión sin atender la tecla. El login y
+    // el despacho lo manejan en su estado, y la calibración solo se usa con el puente.
+    bool in_menu = this->m_current_screen_state != INITIAL_SCREEN_STATE
+                   && this->m_current_screen_state != LOG_IN_SCREEN_STATE
+                   && this->m_current_screen_state != DISPATCH_SCREEN_STATE
+                   && this->m_current_screen_state != CALIBRATION_SCREEN_STATE;
+
+    if(in_menu && cabinet_locked())
+    {
+        logger.logln("Sesion bloqueada por el gabinete.");
+        set_transition(true, INITIAL_SCREEN_STATE);
+    }
+    else
+    {
+        this->m_current_state->screen(p_key);
+    }
+
     transition();
 
     // El ATmega muestra la página base del estado más su contador. El despacho

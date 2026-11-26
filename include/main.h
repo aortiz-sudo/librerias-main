@@ -112,6 +112,20 @@ extern "C"
  * \brief Pin digital para el gabinete.
  */
 #define CABINET_PIN      (int8_t)21
+/**
+ * \def   CABINET_OPEN_STATE
+ * \brief Nivel del pin del gabinete cuando está abierto.
+ *        La bornera CABINET1 va de CABINET_PIN a GND, con pull-up de 10K a 3.3 V. El
+ *        sensor es NC: cerrado (BAJO) con la puerta cerrada. Al abrir, si se corta el
+ *        cable o falta el sensor, el pin lee ALTO y cuenta como abierto.
+ */
+#define CABINET_OPEN_STATE (bool)HIGH
+/**
+ * \def   CABINET_DEBOUNCE_MS
+ * \brief Tiempo que el pin debe sostener un nivel para tomarlo como el estado del gabinete.
+ *        Filtra rebotes del contacto y ruido en el cable.
+ */
+#define CABINET_DEBOUNCE_MS 200UL
 
 #ifndef CALIBRATION_PIN
   /**

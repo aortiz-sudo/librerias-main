@@ -11,17 +11,6 @@
 #include "State.h"
 
 /**
- * \def     OPENED_CABINET
- * \brief   Macro para obtener el estado de gabinete abierto.
- */
-#define OPENED_CABINET this->m_device->get_cabinet_state()
-/**
- * \def     CLOSED_CABINET
- * \brief   Macro para obtener el estado de gabinete cerrado.
- */
-#define CLOSED_CABINET !this->m_device->get_cabinet_state()
-
-/**
  * \struct  screen_param_struct
  * \brief   Estructura de parámetros para inicializar la pantalla principal.
  * 
@@ -369,6 +358,18 @@ class Screen : public I2C_Master_Device
         inline bool get_calibration_pin_state()
         {
             return digitalRead(CALIBRATION_PIN);
+        }
+
+        /**
+         * \brief   Indica si el gabinete bloquea el equipo: abierto y sin el puente de
+         *          calibración (con el puente se trabaja con el gabinete abierto).
+         * \details En los menús se bloquea la sesión, el login no deja entrar, y el despacho
+         *          se detiene y solo se puede terminar.
+         * \returns true: Está abierto y sin el puente.
+         */
+        inline bool cabinet_locked()
+        {
+            return this->m_cabinet_state && !get_calibration_pin_state();
         }
 
         /**

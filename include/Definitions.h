@@ -180,6 +180,13 @@
  */
 #define DISPLAY_WRONG_PASS_ADDRESS          (uint16_t)0x4020
 /**
+ * \def   DISPLAY_WRONG_PASS_TEXT_LENGTH
+ * \brief Caracteres que se escriben en el renglón de DISPLAY_WRONG_PASS_ADDRESS, rellenados
+ *        con espacios para borrar el aviso anterior. El cuadro mide 374 px con la fuente de
+ *        16 x 32 (caben 23) y el control de texto admite 30 bytes.
+ */
+#define DISPLAY_WRONG_PASS_TEXT_LENGTH      22
+/**
  * \def   DISPLAY_FUEL_TEMP_ADDRESS
  * \brief Dirección de memoria para la temperatura del combustible.
  */
