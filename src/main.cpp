@@ -4270,8 +4270,12 @@ tag_status_t check_allocation(const tag_record *p_tag, uint32_t *p_allocation_id
   return result;
 }
 
-/// Suma (o resta, con p_centiliters negativo) al consumo local de una asignación y lo guarda.
-static void change_pending_consumption(uint32_t p_allocation_id, int32_t p_centiliters)
+/**
+ * Ajusta el consumo local de una asignación y lo guarda.
+ * @param p_pending  Centésimas que se suman (o restan) a lo despachado sin confirmar.
+ * @param p_consumed Centésimas que se suman a lo consumido según la plataforma.
+ */
+static void change_consumption(uint32_t p_allocation_id, int32_t p_pending, int32_t p_consumed)
 {
   bool found = false;
 
@@ -4281,8 +4285,9 @@ static void change_pending_consumption(uint32_t p_allocation_id, int32_t p_centi
   {
     if(allocations[i].id == p_allocation_id)
     {
-      int32_t pending = allocations[i].pending + p_centiliters;
+      int32_t pending = allocations[i].pending + p_pending;
       allocations[i].pending = pending > 0 ? pending : 0;
+      allocations[i].consumed += p_consumed;
       found = true;
       break;
     }
@@ -4297,12 +4302,18 @@ static void change_pending_consumption(uint32_t p_allocation_id, int32_t p_centi
 
 void add_pending_consumption(uint32_t p_allocation_id, int32_t p_centiliters)
 {
-  change_pending_consumption(p_allocation_id, p_centiliters);
+  change_consumption(p_allocation_id, p_centiliters, 0);
 }
 
+/**
+ * La plataforma ya lo sumó a sus consumidos, pero el equipo no lo sabe hasta la siguiente
+ * descarga: se pasa de pendiente a consumido para que el saldo no regrese mientras tanto.
+ * La descarga reemplaza consumido con el valor de la plataforma, que ya lo incluye. Envío y
+ * descarga corren en HTTP_Task, así que no se intercalan.
+ */
 void confirm_consumption(uint32_t p_allocation_id, int32_t p_centiliters)
 {
-  change_pending_consumption(p_allocation_id, -p_centiliters);
+  change_consumption(p_allocation_id, -p_centiliters, p_centiliters);
 }
 
 /**
