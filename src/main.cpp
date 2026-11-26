@@ -548,6 +548,14 @@ void events();
 bool sync_platform_data();
 /** @brief Hace un GET a la plataforma y deja la respuesta en platform_buffer. @param p_endpoint Endpoint con su query string. @return Respuesta terminada en nulo, o nullptr si falló. */
 const char *platform_get(const char *p_endpoint);
+/**
+ * @brief Ubica la lista de una respuesta de la plataforma.
+ * @details La versión anterior la regresa en data y la nueva en data.elementos
+ *          (usuarios, tags y productos); las asignaciones vienen en data.
+ * @param p_json Respuesta de platform_get().
+ * @return Apuntador al "[" de la lista, o nullptr si no hay lista.
+ */
+const char *find_platform_list(const char *p_json);
 /** @brief Consulta el registro del dispositivo por su MAC y actualiza el id de cliente. @return true si el dispositivo está registrado. */
 bool sync_device();
 /** @brief Descarga los usuarios del cliente con acceso al equipo. @return true si la descarga fue válida. */
@@ -3492,6 +3500,19 @@ const char *platform_get(const char *p_endpoint)
   return (const char *)platform_buffer;
 }
 
+const char *find_platform_list(const char *p_json)
+{
+  const char *data = parser.find_root_value(p_json, "data");
+
+  if(data && *data == '[')
+    return data;
+
+  if(data && *data == '{')
+    return parser.find_root_array(data, "elementos");
+
+  return nullptr;
+}
+
 /**
  * @brief Consulta el registro del dispositivo y actualiza el id de cliente.
  *
@@ -3508,7 +3529,7 @@ bool sync_device()
   if(!json)
     return false;
 
-  const char *cursor = parser.find_root_array(json, "data");
+  const char *cursor = find_platform_list(json);
 
   if(!cursor)
   {
@@ -3583,7 +3604,7 @@ bool sync_users()
   if(!json)
     return false;
 
-  const char *cursor = parser.find_root_array(json, "data");
+  const char *cursor = find_platform_list(json);
 
   if(!cursor)
   {
@@ -3687,14 +3708,7 @@ bool sync_tags()
   if(!json)
     return false;
 
-  // La versión con límites regresa la lista en data.elementos; la anterior, en data.
-  const char *data = parser.find_root_value(json, "data");
-  const char *cursor = nullptr;
-
-  if(data && *data == '[')
-    cursor = data;
-  else if(data && *data == '{')
-    cursor = parser.find_root_array(data, "elementos");
+  const char *cursor = find_platform_list(json);
 
   if(!cursor)
   {
@@ -3786,7 +3800,7 @@ bool sync_product()
   if(!json)
     return false;
 
-  const char *cursor = parser.find_root_array(json, "data");
+  const char *cursor = find_platform_list(json);
 
   if(!cursor)
   {
@@ -4045,7 +4059,7 @@ bool sync_allocations()
   if(!json)
     return false;
 
-  const char *cursor = parser.find_root_array(json, "data");
+  const char *cursor = find_platform_list(json);
 
   if(!cursor)
   {
