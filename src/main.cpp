@@ -309,11 +309,11 @@ typedef enum : uint8_t
   TAG_NO_BALANCE        ///< El tag tiene límite y su asignación vigente ya no tiene saldo.
 } tag_status_t;
 
-/// Mensajes de la pantalla de despacho cuando se rechaza un tag (17 caracteres).
-static const char *unregistered_tag_message = "Tag no registrado";
-static const char *no_tag_list_message      = "Sin lista de tags";
-static const char *no_allocation_message    = "Sin asignacion   ";
-static const char *no_balance_message       = "Saldo agotado    ";
+/// Mensajes de la pantalla de despacho cuando se rechaza un tag (hasta DISPLAY_MESSAGE_LENGTH caracteres).
+static const char *unregistered_tag_message = "Tag desconocido";
+static const char *no_tag_list_message      = "Sin lista tags";
+static const char *no_allocation_message    = "Sin asignacion";
+static const char *no_balance_message       = "Saldo agotado";
 
 /// Mutex para las listas de usuarios y tags (las usan las cuatro tareas).
 static SemaphoreHandle_t lists_mutex;

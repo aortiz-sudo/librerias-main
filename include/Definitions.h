@@ -202,13 +202,23 @@
 /**
  * \def   DISPLAY_PRODUCT_ADDRESS
  * \brief Dirección de memoria para el producto.
+ * \details Es el único cuadro de texto de las pantallas de despacho, así que también
+ *          muestra los mensajes del tag; sin mensaje vuelve a mostrar el producto.
  */
 #define DISPLAY_PRODUCT_ADDRESS             (uint16_t)0x4230
 /**
- * \def   DISPLAY_TAG_MESSAGE_ADDRESS
- * \brief Dirección de memoria para mensajes de tag.
+ * \def   DISPLAY_PRODUCT_TEXT_LENGTH
+ * \brief Bytes del texto del cuadro del producto (Text_Length del control en el proyecto
+ *        DGUS). Se escriben completos, rellenando con espacios, para borrar el texto
+ *        anterior; ocupan de 0x4230 a 0x4239.
  */
-#define DISPLAY_TAG_MESSAGE_ADDRESS         (uint16_t)0x4240
+#define DISPLAY_PRODUCT_TEXT_LENGTH         20
+/**
+ * \def   DISPLAY_MESSAGE_LENGTH
+ * \brief Caracteres que caben en un renglón del cuadro del producto: 240 px de ancho con
+ *        la fuente de 16 x 32. Uno más pasaría al segundo renglón.
+ */
+#define DISPLAY_MESSAGE_LENGTH              15
 /**
  * \def   DISPLAY_DISPATCHED_VOLUME_ADDRESS
  * \brief Dirección de memoria para el volumen despachado final.

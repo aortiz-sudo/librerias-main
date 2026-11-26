@@ -218,7 +218,7 @@ class State
         static bool m_quantity_dispatch;   ///< Indica si se despacha por cantidad.
 
         screen_state m_next_states[4] = { (screen_state)0 };     ///< Arreglo de posibles siguientes estados.
-        const char *m_no_tag_message = "No se detecta tag"; ///< Mensaje de tag no detectado.
+        const char *m_no_tag_message = "No se lee tag";   ///< Mensaje de tag no detectado.
     
     protected:
         /**
@@ -527,8 +527,10 @@ class dispatch_state : public State
 
     private:
         /**
-         * \brief           Escribe un mensaje en el campo del tag (17 caracteres).
-         * \param p_message Mensaje a mostrar.
+         * \brief           Escribe un mensaje en el cuadro del producto, el único de texto
+         *                  de las pantallas de despacho.
+         * \param p_message Mensaje a mostrar (hasta DISPLAY_MESSAGE_LENGTH caracteres; se
+         *                  recorta si pasa), o nullptr para volver a mostrar el producto.
          */
         void write_message(const char *p_message);
 
@@ -564,10 +566,9 @@ class dispatch_state : public State
         float m_target = 0.0f;              ///< Litros a los que se detiene: la cantidad escrita o el saldo del tag.
         bool m_confirm_pending = false;     ///< La cantidad se recortó al saldo del tag: se espera "iniciar" otra vez.
         bool m_show_balance = false;        ///< Despacho libre de un tag con límite: el saldo queda a la vista.
-        char m_balance_message[18] = "";    ///< "Saldo X L" (17 caracteres).
-        const char *m_clear_tag_message = "                 ";   ///< Texto para borrar el mensaje del tag.
-        const char *m_reading_tag_message = "Leyendo tag      "; ///< Mensaje mientras se espera el tag para iniciar.
-        const char *m_tag_found_message = "Tag detectado    ";   ///< Mensaje en pausa cuando se vuelve a leer el tag.
+        char m_balance_message[DISPLAY_MESSAGE_LENGTH + 1] = "";  ///< "Saldo X L".
+        const char *m_reading_tag_message = "Leyendo tag";        ///< Mensaje mientras se espera el tag para iniciar.
+        const char *m_tag_found_message = "Tag detectado";        ///< Mensaje en pausa cuando se vuelve a leer el tag.
 };
 
 /**

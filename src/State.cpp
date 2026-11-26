@@ -492,29 +492,31 @@ void dispatch_state::draw()
     this->m_device->write_to_address(DISPLAY_DISPATCHED_VOLUME_ADDRESS, (uint8_t *)&zero, sizeof(zero));
     this->m_device->write_to_address(DISPLAY_DISPATCHED_COST_ADDRESS, (uint8_t *)&zero, sizeof(zero));
 
-    const char *product = this->m_device->get_product();
-    this->m_device->write_to_address(DISPLAY_PRODUCT_ADDRESS, (uint8_t *)product, strlen(product));
-
-    // El tag se empieza a leer hasta que se presiona "iniciar".
+    // El tag se empieza a leer hasta que se presiona "iniciar". Mientras, el cuadro de
+    // texto muestra el producto.
     this->m_device->set_dispatching(false);
     this->m_counter = 0;
-    write_message(this->m_clear_tag_message);
+    write_message(nullptr);
 }
 
 void dispatch_state::write_message(const char *p_message)
 {
-    this->m_device->write_to_address(DISPLAY_TAG_MESSAGE_ADDRESS, (uint8_t *)p_message, strlen(p_message));
+    const char *text = p_message ? p_message : this->m_device->get_product();
+    char field[DISPLAY_PRODUCT_TEXT_LENGTH];
+    size_t length = strnlen(text, DISPLAY_MESSAGE_LENGTH);
+
+    memcpy(field, text, length);
+    memset(field + length, ' ', sizeof(field) - length);
+    this->m_device->write_to_address(DISPLAY_PRODUCT_ADDRESS, (uint8_t *)field, sizeof(field));
 }
 
 void dispatch_state::set_balance_message(float p_liters)
 {
-    // Se rellena con espacios para borrar lo que hubiera en el campo de 17 caracteres.
     int length = snprintf(this->m_balance_message, sizeof(this->m_balance_message), "Saldo %.2f L", p_liters);
 
-    for(int i = (length < 0) ? 0 : length; i < (int)sizeof(this->m_balance_message) - 1; i++)
-        this->m_balance_message[i] = ' ';
-
-    this->m_balance_message[sizeof(this->m_balance_message) - 1] = '\0';
+    // Desde 10,000 L ya no caben los decimales en el renglón.
+    if(length < 0 || length > DISPLAY_MESSAGE_LENGTH)
+        snprintf(this->m_balance_message, sizeof(this->m_balance_message), "Saldo %.0f L", p_liters);
 }
 
 void dispatch_state::begin_dispatch()
@@ -541,7 +543,7 @@ void dispatch_state::run_dispatch()
     this->m_counter = 1;
     this->m_device->set_dispatching(true);
     this->m_state_callback_function((uint8_t *)&m_dispatched_volume, 0);
-    write_message(this->m_show_balance ? this->m_balance_message : this->m_clear_tag_message);
+    write_message(this->m_show_balance ? this->m_balance_message : nullptr);
 }
 
 void dispatch_state::pause_dispatch()
@@ -556,7 +558,7 @@ void dispatch_state::finish_dispatch()
     this->m_counter = 3;
     this->m_state_callback_function((uint8_t *)&m_dispatched_volume, 3);
     this->m_device->stop_tag_reading();
-    write_message(this->m_clear_tag_message);
+    write_message(nullptr);
 }
 
 void dispatch_state::screen(char p_key)
@@ -676,10 +678,7 @@ void dispatch_state::screen(char p_key)
         if(OPENED_CABINET)
         {
             pause_dispatch();
-            const char *text1 = "                 ";
-            this->m_device->write_to_address(DISPLAY_TAG_MESSAGE_ADDRESS, (uint8_t *)text1, strlen(text1));
-            const char *text2 = "GABINETE ABIERTO";
-            this->m_device->write_to_address(DISPLAY_TAG_MESSAGE_ADDRESS, (uint8_t *)text2, strlen(text2));
+            write_message("Cerrar gabinete");
         }
     }
 
