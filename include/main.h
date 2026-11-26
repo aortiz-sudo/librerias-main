@@ -580,6 +580,14 @@ extern "C"
  *        avisar si se desconectó.
  */
 #define RFID_CHECK_INTERVAL_MS         600000UL
+/**
+ * \def   RFID_MAX_TIMEOUTS
+ * \brief Consultas seguidas sin respuesta del lector para reportarlo desconectado.
+ *        En banco, una sola llegaba a veces al retirar el tag y el lector seguía
+ *        funcionando. Tras una sin respuesta se vuelve a consultar a
+ *        RFID_DISPATCH_READ_INTERVAL_MS, también fuera del despacho, para confirmar pronto.
+ */
+#define RFID_MAX_TIMEOUTS              3
 
 #define MAX_EVENT_JSON_LENGTH 256       ///< Longitud máxima del JSON de un evento.
 #define MAX_UPDATE_JSON_LENGTH 64       ///< Longitud máxima del JSON de una actualización.

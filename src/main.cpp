@@ -2805,7 +2805,8 @@ void get_lls_data()
  *   primera lectura buena se reporta detectado otra vez y se puede reanudar.
  *
  * Fuera de eso solo se consulta el lector cada RFID_CHECK_INTERVAL_MS, para avisar
- * si se desconectó.
+ * si se desconectó. Se reporta desconectado tras RFID_MAX_TIMEOUTS consultas seguidas
+ * sin respuesta, y vuelve a estar conectado con cualquier respuesta, con o sin tag.
  */
 void get_rfid_data()
 {
@@ -2820,6 +2821,8 @@ void get_rfid_data()
   static uint8_t missed_reads = 0;
   /// Último tag rechazado, para no repetir el log en cada lectura mientras siga frente al lector.
   static uint32_t last_rejected_tag = UINT32_MAX;
+  /// Consultas seguidas en las que el lector no respondió.
+  static uint8_t timeouts = 0;
 
   bool reading = screen->get_screen_state() == DISPATCH_SCREEN_STATE && screen->get_tag_reading();
   uint8_t current_session = screen->get_tag_session();
@@ -2834,7 +2837,8 @@ void get_rfid_data()
   }
 
   unsigned long current_millis = millis();
-  unsigned long interval = reading ? RFID_DISPATCH_READ_INTERVAL_MS : RFID_CHECK_INTERVAL_MS;
+  bool confirming = timeouts > 0 && timeouts < RFID_MAX_TIMEOUTS;
+  unsigned long interval = (reading || confirming) ? RFID_DISPATCH_READ_INTERVAL_MS : RFID_CHECK_INTERVAL_MS;
 
   if(current_millis - last_millis < interval)
     return;
@@ -2845,14 +2849,23 @@ void get_rfid_data()
   status rfid_status = rfid_device->get_tag_data(&tag_data, RFID_READER_ADDR);
   bool tag_read = rfid_status == MT124::READ_TAG_SUCCESSFULLY;
 
-  if(tag_read)
+  if(rfid_status == MT124::TIMEOUT_ERROR)
   {
-    rfid_disconnected_event_flag = false;  // Reiniciar bandera de desconexión al leer una etiqueta exitosamente
+    if(timeouts < RFID_MAX_TIMEOUTS && ++timeouts == RFID_MAX_TIMEOUTS && !rfid_disconnected_event_flag)
+    {
+      logger.logln("El lector RFID no responde.");
+      trigger_event(RFID_READER_DISCONNECTED);
+      rfid_disconnected_event_flag = true;
+    }
   }
-  else if(rfid_status == MT124::TIMEOUT_ERROR && !rfid_disconnected_event_flag)
+  else
   {
-    trigger_event(RFID_READER_DISCONNECTED);
-    rfid_disconnected_event_flag = true;
+    // Respondió, con o sin tag: está conectado.
+    if(rfid_disconnected_event_flag)
+      logger.logln("El lector RFID volvio a responder.");
+
+    timeouts = 0;
+    rfid_disconnected_event_flag = false;
   }
 
   // La lectura tarda de 100 a 200 ms: si mientras tanto se terminó o se volvió a
