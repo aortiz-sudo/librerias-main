@@ -55,6 +55,17 @@ class Ethernet_HTTP : public Global_Client
          */
         int download_content(Stream *p_stream);
 
+        /**
+         * \brief   Código de la última petición tal como llegó (200, 201, 401...) o el error
+         *          negativo si no hubo respuesta. get_data_from_server() regresa -1 con
+         *          cualquier código que no sea 2xx; quien necesite distinguirlos lo lee aquí.
+         * \returns Código HTTP o de error de la última petición.
+         */
+        inline int get_last_status() const
+        {
+            return this->m_last_status;
+        }
+
     private:
         /**
          * \brief               Realiza una petición HTTP POST al servidor.
@@ -95,6 +106,7 @@ class Ethernet_HTTP : public Global_Client
 
         char m_response[2048] = { 0 }; ///< Buffer para la respuesta HTTP del servidor.
         int m_last_http_code = 200;    ///< Resultado de la petición anterior: 200 para cualquier 2xx (al arrancar, el primer OK no se registra).
+        int m_last_status = 0;         ///< Código de la última petición sin agrupar (ver get_last_status()).
 
 };
 

@@ -22,6 +22,7 @@ void Ethernet_HTTP::log_http_code(int p_code)
     }
 
     this->m_last_http_code = result;
+    this->m_last_status = p_code;
 }
 
 int Ethernet_HTTP::send_data_to_server(const uint8_t *p_data, size_t p_data_length)

@@ -56,14 +56,25 @@ bool Ethernet_SocketIO::connect_to_namespace(int p_namespace_index)
     if(p_namespace_index >= this->m_namespace_counter)
         return false;
 
-    char string[48] = "";
+    // Se une con el identificador y, si hay, la llave: un servidor que no la valida ignora
+    // el campo. En el log la llave va como ****. Si el mensaje con la llave no cupiera, se
+    // manda el de antes, sin ella, en lugar de un JSON cortado que el servidor rechazaría.
+    const char *auth_key = auth_key_to_send();
+    char string[SOCKETIO_CONNECT_MESSAGE_SIZE] = "";
+    char log_string[SOCKETIO_CONNECT_MESSAGE_SIZE] = "";
 
-    string[0] = (char)NORMAL_MESSAGE;
-    string[1] = (char)CONNECT_MESSAGE;
-    snprintf(&string[2], sizeof(string) - 3, "%s,{\"%s\":\"%s\"}", this->m_namespace[p_namespace_index], this->m_identifier, this->m_identifier_value);
-    string[sizeof(string) - 1] = '\0';
+    if(auth_key && !build_connect_message(string, sizeof(string), p_namespace_index, auth_key))
+    {
+        logger.logln("La llave no cabe en el mensaje de conexion al namespace; se conecta sin ella.");
+        auth_key = nullptr;
+    }
 
-    logger.debugln(string);
+    if(!auth_key)
+        build_connect_message(string, sizeof(string), p_namespace_index, nullptr);
+
+    build_connect_message(log_string, sizeof(log_string), p_namespace_index, auth_key ? "****" : nullptr);
+
+    logger.debugln(log_string);
     send_text_message(string);
     
     bool client_available = false;
@@ -75,7 +86,10 @@ bool Ethernet_SocketIO::connect_to_namespace(int p_namespace_index)
     }
 
     if(!client_available)
+    {
+        logger.debugln("Sin respuesta al unirse al namespace.");
         return false;
+    }
 
     char response[256] = "";
     int length = 0;
@@ -89,8 +103,51 @@ bool Ethernet_SocketIO::connect_to_namespace(int p_namespace_index)
         return false;
     }
 
-    if(response[1] != (char)CONNECT_MESSAGE)
+    // 44<namespace>,{"message":"..."}: el servidor rechazó la conexión (por ejemplo, la llave).
+    // Se registra la primera vez; mientras siga rechazándola, los reintentos van al debug.
+    if(response[0] == (char)NORMAL_MESSAGE && response[1] == (char)CONENCT_ERROR_MESSAGE)
+    {
+        char reason[64] = "";
+        const char *message = strstr(response, "\"message\":\"");
+
+        if(message)
+        {
+            message += strlen("\"message\":\"");
+            size_t reason_length = strcspn(message, "\"");
+
+            if(reason_length >= sizeof(reason))
+                reason_length = sizeof(reason) - 1;
+
+            memcpy(reason, message, reason_length);
+            reason[reason_length] = '\0';
+        }
+
+        if(!this->m_namespace_rejected)
+        {
+            logger.log("El servidor rechazo la conexion al namespace ");
+            logger.log(this->m_namespace[p_namespace_index]);
+            logger.log(": ");
+            logger.logln(reason);
+        }
+        else
+        {
+            logger.debugln("El servidor sigue rechazando la conexion al namespace.");
+        }
+
+        this->m_namespace_rejected = true;
         return false;
+    }
+
+    if(response[1] != (char)CONNECT_MESSAGE)
+    {
+        logger.debugln("Respuesta inesperada al unirse al namespace.");
+        return false;
+    }
+
+    if(this->m_namespace_rejected)
+        logger.logln("El servidor volvio a aceptar la conexion al namespace.");
+
+    this->m_namespace_rejected = false;
 
     char *json = strchr(response, '{');
 
@@ -295,6 +352,56 @@ void Ethernet_SocketIO::set_identifer(const char *p_identifier, const char *p_va
     this->m_identifier_value = (char *)p_value;
 }
 
+bool Ethernet_SocketIO::connect_namespaces()
+{
+    for(int i = 0; i < this->m_namespace_counter; i++)
+    {
+        if(!connect_to_namespace(i))
+        {
+            this->m_global_client->flush();
+            this->m_global_client->stop();
+            return false;
+        }
+    }
+
+    return true;
+}
+
+void Ethernet_SocketIO::set_auth_key(const char *p_name, const char *p_value)
+{
+    this->m_auth_key = p_name;
+    this->m_auth_key_value = p_value;
+}
+
+const char *Ethernet_SocketIO::auth_key_to_send() const
+{
+    if(!this->m_auth_key || !this->m_auth_key_value || this->m_auth_key_value[0] == '\0')
+        return nullptr;
+
+    // Va sin escapar dentro del JSON: comillas, diagonales o caracteres de control lo romperían.
+    for(const char *c = this->m_auth_key_value; *c; c++)
+    {
+        if(*c < 0x20 || *c > 0x7E || *c == '"' || *c == '\\')
+            return nullptr;
+    }
+
+    return this->m_auth_key_value;
+}
+
+bool Ethernet_SocketIO::build_connect_message(char *p_buffer, size_t p_size, int p_namespace_index, const char *p_key) const
+{
+    int length;
+
+    if(p_key)
+        length = snprintf(p_buffer, p_size, "%c%c%s,{\"%s\":\"%s\",\"%s\":\"%s\"}", (char)NORMAL_MESSAGE, (char)CONNECT_MESSAGE,
+                          this->m_namespace[p_namespace_index], this->m_identifier, this->m_identifier_value, this->m_auth_key, p_key);
+    else
+        length = snprintf(p_buffer, p_size, "%c%c%s,{\"%s\":\"%s\"}", (char)NORMAL_MESSAGE, (char)CONNECT_MESSAGE,
+                          this->m_namespace[p_namespace_index], this->m_identifier, this->m_identifier_value);
+
+    return length > 0 && (size_t)length < p_size;
+}
+
 void Ethernet_SocketIO::begin_reconnect()
 {
     this->m_reconnecting = true;
@@ -308,11 +415,10 @@ void Ethernet_SocketIO::reconnect()
     if(millis() - this->m_last_reconnect_millis < this->m_reconnect_delay)
         return;
 
-    if(start_websocket_client())
+    // Si no se pudo unir a un namespace, connect_namespaces() ya cerró el socket: se sigue
+    // reintentando con espera, igual que si no hubiera conexión.
+    if(start_websocket_client() && connect_namespaces())
     {
-        for(int i = 0; i < this->m_namespace_counter; i++)
-            connect_to_namespace(i);
-
         this->m_reconnecting = false;
         this->m_reconnect_delay = 0;
         report_connection(true, "Conexion al servidor Socket.IO restablecida.");
@@ -413,7 +519,12 @@ void Ethernet_SocketIO::handle_message()
 
         case NORMAL_MESSAGE:
         {
-            logger.debugln((const char *)&data[0]);
+            // El evento apiKey trae la llave: no va al log (en depuración sale por el puerto serial).
+            if(strstr((const char *)&data[0], "\"apikey\""))
+                logger.debugln("Mensaje con la API key (no se muestra).");
+            else
+                logger.debugln((const char *)&data[0]);
+
             event_handler((const char *)&data[1], length - 1);
             return;
         }

@@ -602,6 +602,12 @@ extern "C"
  *        RFID_DISPATCH_READ_INTERVAL_MS, también fuera del despacho, para confirmar pronto.
  */
 #define RFID_MAX_TIMEOUTS              3
+/**
+ * \def   API_KEY_CHECK_RETRY_MS
+ * \brief Espera entre intentos de comprobar la API key que mandó la plataforma cuando no
+ *        hubo respuesta clara (sin red o error del servidor). Con 2xx o 401 se resuelve.
+ */
+#define API_KEY_CHECK_RETRY_MS         60000UL
 
 #define MAX_EVENT_JSON_LENGTH 256       ///< Longitud máxima del JSON de un evento.
 #define MAX_UPDATE_JSON_LENGTH 64       ///< Longitud máxima del JSON de una actualización.

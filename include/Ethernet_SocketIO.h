@@ -35,6 +35,14 @@
 #define SOCKETIO_RECONNECT_MAX_MS 60000UL
 
 /**
+ * \def     SOCKETIO_CONNECT_MESSAGE_SIZE
+ * \brief   Tamaño del mensaje para conectarse a un namespace: "40", el namespace, el
+ *          identificador y la llave (hasta 71 caracteres) caben con holgura. Un mensaje
+ *          cortado sería JSON inválido y el servidor rechazaría la conexión.
+ */
+#define SOCKETIO_CONNECT_MESSAGE_SIZE 192
+
+/**
  * \enum    engine_io_msg_t
  * \brief   Tipos de mensajes de Engine.IO.
  */
@@ -134,6 +142,16 @@ class Ethernet_SocketIO : public Ethernet_WebSocket
         bool connect_to_namespace(int p_namespace_index = 0);
 
         /**
+         * \brief   Se une a todos los namespaces registrados.
+         * \details Si alguno no responde o el servidor rechaza la conexión (por ejemplo, por
+         *          la llave), cierra el socket: sin namespace no llega ningún evento aunque
+         *          sigan los pings. handle_message() lo toma como desconexión y reintenta con
+         *          espera (de SOCKETIO_RECONNECT_MIN_MS a SOCKETIO_RECONNECT_MAX_MS).
+         * \returns true si se unió a todos.
+         */
+        bool connect_namespaces();
+
+        /**
          * \brief Maneja los mensajes recibidos del servidor.
          */
         void handle_message();
@@ -201,6 +219,17 @@ class Ethernet_SocketIO : public Ethernet_WebSocket
          */
         void set_identifer(const char *p_identifier, const char *p_value);
 
+        /**
+         * \brief           Agrega la llave al objeto con el que se une al namespace, junto al
+         *                  identificador: {"<identificador>":"<valor>","<p_name>":"<llave>"}.
+         * \details         Se lee en cada conexión, así que una llave nueva se manda desde la
+         *                  siguiente reconexión. Quien la cambie debe tener el mismo mutex que la
+         *                  conexión (http_mutex). Un servidor que no la valida ignora el campo.
+         * \param p_name    Nombre del campo.
+         * \param p_value   Buffer con la llave terminada en nulo; vacío = no se manda.
+         */
+        void set_auth_key(const char *p_name, const char *p_value);
+
     private:
         char *m_namespace[MAX_NUMBER_OF_NAMPESPACES] =      ///< Arreglo de namespaces registrados.
         {
@@ -209,6 +238,9 @@ class Ethernet_SocketIO : public Ethernet_WebSocket
         char m_sid[25] = { 0 };                             ///< Session ID.
         char *m_identifier = nullptr;                       ///< Nombre del identificador.
         char *m_identifier_value = nullptr;                 ///< Valor del identificador.
+        const char *m_auth_key = nullptr;                   ///< Nombre del campo de la llave.
+        const char *m_auth_key_value = nullptr;             ///< Buffer con la llave (se lee en cada conexión).
+        bool m_namespace_rejected = false;                  ///< El último intento fue rechazado (para registrarlo solo la primera vez).
         event_callback m_callback_functions[MAX_NUMBER_OF_EVENTS] = { 0 }; ///< Arreglo de funciones callback para eventos.
         char *m_events[MAX_NUMBER_OF_EVENTS] = { 0 };       ///< Arreglo de nombres de eventos.
         uint8_t m_event_counter = 0;                        ///< Contador de eventos registrados.
@@ -243,6 +275,22 @@ class Ethernet_SocketIO : public Ethernet_WebSocket
          * \param p_message     Aviso a registrar.
          */
         void report_connection(bool p_connected, const char *p_message);
+
+        /**
+         * \brief   Llave a mandar al unirse al namespace.
+         * \returns La llave, o nullptr si no hay o trae caracteres que romperían el JSON.
+         */
+        const char *auth_key_to_send() const;
+
+        /**
+         * \brief                   Arma el mensaje para unirse a un namespace.
+         * \param p_buffer          Buffer destino.
+         * \param p_size            Tamaño del buffer.
+         * \param p_namespace_index Índice del namespace.
+         * \param p_key             Llave a incluir, o nullptr para mandar solo el identificador.
+         * \returns                 true si el mensaje cupo completo.
+         */
+        bool build_connect_message(char *p_buffer, size_t p_size, int p_namespace_index, const char *p_key) const;
 
         /**
          * \brief   Realiza el handshake inicial con el servidor.

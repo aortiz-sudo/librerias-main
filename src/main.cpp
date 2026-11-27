@@ -351,6 +351,8 @@ static char *display_ticket_info[] =
 
 /// Header personalizado para WebSocket.
 static const char *websocket_identifier = "identificador";
+/// Campo con la API key al unirse al namespace, para que la plataforma autentique el socket.
+static const char *websocket_api_key_field = "apikey";
 /// Namespace del dispositivo.
 static const char *socket_io_device_namespace = "/device";
 /// Namespace de actualizaciones.
@@ -424,6 +426,10 @@ static const char *firmwares_endpoints[3] = { "/.pio/build/" ESP32_FW_ENV "/firm
 /// Prefijo del tag de cada componente en firmware_repository: la versión X del ESP32 está en el tag "esp32-X".
 static const char *firmware_tag_prefixes[3] = { "esp32-", "display-", "printer-" };
 static char api_key[72];
+/// Última API key que funcionó, mientras se comprueba la que mandó la plataforma (check_new_api_key()).
+static char previous_api_key[sizeof(api_key)] = "";
+/// La plataforma mandó una API key nueva y todavía no se comprueba. Se lee y escribe con http_mutex.
+static bool api_key_check_pending = false;
 static char ca_cert[CA_CERT_SIZE] = { 0 };
 static char data_endpoint[32] = "/api/data/";
 static char product_endpoint[32] = "/api/productos";
@@ -548,8 +554,10 @@ void send_last_events();
 void events();
 /** @brief Descarga de la plataforma el cliente del dispositivo, los usuarios, los tags y el precio. @return true si se descargaron las listas de usuarios y de tags. */
 bool sync_platform_data();
-/** @brief Hace un GET a la plataforma y deja la respuesta en platform_buffer. @param p_endpoint Endpoint con su query string. @return Respuesta terminada en nulo, o nullptr si falló. */
-const char *platform_get(const char *p_endpoint);
+/** @brief Hace un GET a la plataforma y deja la respuesta en platform_buffer. @param p_endpoint Endpoint con su query string. @param p_status Si no es nullptr, recibe el código HTTP (o el error negativo) de la respuesta. @return Respuesta terminada en nulo, o nullptr si falló. */
+const char *platform_get(const char *p_endpoint, int *p_status = nullptr);
+/** @brief Comprueba con la plataforma la API key que llegó por el evento apiKey: la guarda en la SD si funciona, o vuelve a la anterior si la rechaza (401). */
+void check_new_api_key();
 /**
  * @brief Ubica la lista de una respuesta de la plataforma.
  * @details La versión anterior la regresa en data y la nueva en data.elementos
@@ -812,6 +820,9 @@ void HTTP_Task(void *pvParameters)
 
     unsigned long current_millis = millis();
 
+    // Antes que los eventos: si la plataforma rechaza la llave nueva, se vuelve a la anterior
+    // y los eventos no se intentan con una llave que no sirve.
+    check_new_api_key();
     check_events();
     check_updates();
 
@@ -904,13 +915,19 @@ void Websocket_Task(void *pvParameters)
   websocket_client->set_event(api_key_event, api_key_updated);
   websocket_client->set_reconnect_callback(on_socketio_reconnected);
   websocket_client->set_identifer(websocket_identifier, device_name);
-  int device_namespace_index = websocket_client->set_namespace(socket_io_device_namespace);
-  
+
+  // La llave va junto al identificador al unirse al namespace. Se lee de api_key en cada
+  // conexión: api_key_updated() la cambia en esta misma tarea y con http_mutex tomado.
+  websocket_client->set_auth_key(websocket_api_key_field, api_key);
+  websocket_client->set_namespace(socket_io_device_namespace);
+
   while(!ethernet_begin) { vTaskDelay(1000 / portTICK_PERIOD_MS); }
 
+  // Si no se une al namespace (sin respuesta, o el servidor rechaza la llave), se cierra el
+  // socket y handle_message() reintenta con espera.
   xSemaphoreTake(http_mutex, portMAX_DELAY);
   if(websocket_client->start_websocket_client())
-    websocket_client->connect_to_namespace(device_namespace_index);
+    websocket_client->connect_namespaces();
   xSemaphoreGive(http_mutex);
 
   unsigned long last_reconnect_millis = 0;
@@ -1469,6 +1486,11 @@ void dispatch(uint8_t *p_dispatch_volume, int args)
     {
       // Corte inmediato: al llegar a la cantidad, el despacho termina aquí con las válvulas
       // abiertas, y la cola de relés no se aplicaría hasta después de la espera.
+      // Antes se vacía la cola: si se reanudó ya en la cantidad (el escurrimiento de la
+      // pausa la alcanzó), el encendido de run_dispatch() sigue pendiente, y
+      // read_write_ios() lo aplicaría después de este corte. Los relés quedaban encendidos
+      // con el despacho terminado, y la ISR ya no contaba lo que saliera.
+      xQueueReset(Relay_Queue);
       uint8_t current_relay_states[3] = { RELAY_OFF, RELAY_OFF, RELAY_OFF };
       relay_control(current_relay_states);
       logger.logln("Despacho detenido");
@@ -3515,8 +3537,11 @@ bool sync_platform_data()
   return users_synced && tags_synced;
 }
 
-const char *platform_get(const char *p_endpoint)
+const char *platform_get(const char *p_endpoint, int *p_status)
 {
+  if(p_status)
+    *p_status = 0;
+
   if(!ethernet_begin)
     return nullptr;
 
@@ -3533,6 +3558,11 @@ const char *platform_get(const char *p_endpoint)
   http_client->set_header("x-api-key", api_key, 2);
   int length = http_client->get_data_from_server(platform_buffer, sizeof(platform_buffer));
   http_client->flush_headers();
+
+  // Se lee con el mutex tomado: Websocket_Task también usa http_client (descarga de firmware).
+  if(p_status)
+    *p_status = http_client->get_last_status();
+
   xSemaphoreGive(http_mutex);
 
   if(length <= 0)
@@ -5211,18 +5241,117 @@ void api_key_updated(const char *p_payload)
   }
 
   // Corre con http_mutex tomado, y las peticiones leen api_key con el mismo mutex.
+  // La misma llave que ya se usa: no se reescribe la SD.
+  if(strlen(api_key) == length && memcmp(api_key, value, length) == 0)
+  {
+    logger.logln("Evento apiKey con la misma llave: no hay cambio.");
+    return;
+  }
+
+  // Se usa desde ya, pero se guarda en la SD hasta que check_new_api_key() la compruebe con
+  // la plataforma. Si llega otra antes de comprobarla, la anterior sigue siendo la última
+  // que funcionó. Se acepta la de otro cliente: así se cambia un equipo de cliente.
+  if(!api_key_check_pending)
+  {
+    strncpy(previous_api_key, api_key, sizeof(previous_api_key) - 1);
+    previous_api_key[sizeof(previous_api_key) - 1] = '\0';
+  }
+
   memcpy(api_key, value, length);
   api_key[length] = '\0';
+  api_key_check_pending = true;
 
-  // read_api_key() espera una sola línea terminada en salto de línea, y restaura el
-  // respaldo si no la encuentra: se escriben los dos archivos.
-  char line[sizeof(api_key) + 2];
-  snprintf(line, sizeof(line), "%s\n", api_key);
-  build_sd_info(API_KEY_PATH, line, SAVE_FILE);
-  build_sd_info(API_KEY_BACKUP_PATH, line, SAVE_FILE);
+  logger.log("API key nueva recibida para el cliente ");
+  logger.log(strtoul(api_key, nullptr, 10));
+  logger.logln("; se comprueba antes de guardarla.");
+}
 
-  logger.log("API key actualizada desde la plataforma para el cliente ");
-  logger.logln(strtoul(api_key, nullptr, 10));
+/**
+ * @brief Comprueba con la plataforma la API key que llegó por el evento apiKey.
+ *
+ * Corre en HTTP_Task, antes de enviar eventos. Se comprueba con la consulta del dispositivo,
+ * que responde 200 con una llave válida; no con /api/asignaciones, que en producción responde
+ * 401 aun con una llave válida.
+ * - 2xx: la llave funciona y se guarda en /api-key.txt y en su respaldo.
+ * - 401: la plataforma la rechaza; se vuelve a la anterior y la SD no se toca.
+ * - Otro resultado (sin red, error del servidor): se reintenta cada API_KEY_CHECK_RETRY_MS.
+ * Si el equipo se reinicia antes de comprobarla, arranca con la de la SD (la anterior).
+ */
+void check_new_api_key()
+{
+  static unsigned long last_check_millis = 0;
+  static bool retrying = false;
+
+  xSemaphoreTake(http_mutex, portMAX_DELAY);
+  bool pending = api_key_check_pending;
+  char checked_key[sizeof(api_key)];
+  strcpy(checked_key, api_key);
+  xSemaphoreGive(http_mutex);
+
+  if(!pending || !ethernet_begin)
+    return;
+
+  if(retrying && millis() - last_check_millis < API_KEY_CHECK_RETRY_MS)
+    return;
+
+  char endpoint[96];
+  snprintf(endpoint, sizeof(endpoint), "%s?identificador=%s&listado=true", device_endpoint, device_name);
+
+  int status = 0;
+  platform_get(endpoint, &status);
+  last_check_millis = millis();
+
+  xSemaphoreTake(http_mutex, portMAX_DELAY);
+
+  // Llegó otra llave mientras se comprobaba esta: se comprueba esa en el siguiente ciclo.
+  if(strcmp(api_key, checked_key) != 0)
+  {
+    xSemaphoreGive(http_mutex);
+    retrying = false;
+    return;
+  }
+
+  if(status / 100 == 2)
+  {
+    api_key_check_pending = false;
+    previous_api_key[0] = '\0';
+
+    // read_api_key() espera una sola línea terminada en salto de línea, y restaura el
+    // respaldo si no la encuentra: se escriben los dos archivos.
+    char line[sizeof(api_key) + 2];
+    snprintf(line, sizeof(line), "%s\n", api_key);
+    build_sd_info(API_KEY_PATH, line, SAVE_FILE);
+    build_sd_info(API_KEY_BACKUP_PATH, line, SAVE_FILE);
+    xSemaphoreGive(http_mutex);
+
+    retrying = false;
+    logger.log("API key nueva comprobada y guardada para el cliente ");
+    logger.logln(strtoul(checked_key, nullptr, 10));
+    return;
+  }
+
+  if(status == 401)
+  {
+    strcpy(api_key, previous_api_key);
+    api_key_check_pending = false;
+    previous_api_key[0] = '\0';
+    xSemaphoreGive(http_mutex);
+
+    retrying = false;
+    logger.logln("La plataforma rechazo la API key nueva (401): se vuelve a la anterior.");
+    return;
+  }
+
+  xSemaphoreGive(http_mutex);
+
+  if(!retrying)
+  {
+    logger.log("No se pudo comprobar la API key nueva (codigo ");
+    logger.log(status);
+    logger.logln("); se reintenta cada minuto.");
+  }
+
+  retrying = true;
 }
 
 /**
