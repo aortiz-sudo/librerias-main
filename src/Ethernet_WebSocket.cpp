@@ -2,21 +2,113 @@
 
 int Ethernet_WebSocket::get_data_from_server(uint8_t *p_data, size_t p_buffer_len)
 {
-    if(!this->m_global_client->connected())
-        return WEBSOCKET_ERROR_NOT_CONNECTED;
+    // Un frame a la vez: lo recibido se junta en m_rx_buffer y se entrega solo el primer
+    // frame completo; el resto queda para la siguiente llamada. Antes se leía todo lo
+    // disponible como un solo mensaje, y un mensaje que llegaba pegado a otro se perdía
+    // (p. ej. deviceConnected justo después de unirse al namespace); uno partido en dos
+    // lecturas se interpretaba mal.
+    bool connected = this->m_global_client->connected();
 
-    int client_available = this->m_global_client->available();
+    fill_rx_buffer();
 
-    if(!client_available)
-        return WEBSOCKET_ERROR_NO_STREAM;
+    size_t frame_length = complete_frame_length();
 
-    size_t counter = 0;
-    while(this->m_global_client->available() && counter < p_buffer_len)
+    if(frame_length == 0)
+        return connected ? WEBSOCKET_ERROR_NO_STREAM : WEBSOCKET_ERROR_NOT_CONNECTED;
+
+    // Lo que no quepa en el buffer de quien lee se recorta, pero el frame se consume
+    // completo para que el siguiente empiece en su lugar.
+    size_t copied = frame_length < p_buffer_len ? frame_length : p_buffer_len;
+    memcpy(p_data, this->m_rx_buffer, copied);
+
+    this->m_rx_length -= frame_length;
+    memmove(this->m_rx_buffer, this->m_rx_buffer + frame_length, this->m_rx_length);
+
+    if(copied < frame_length)
+        logger.logln("Mensaje del websocket mas largo que el buffer; se recorta.");
+
+    return handle_websocket_data(p_data, copied);
+}
+
+void Ethernet_WebSocket::reset_rx_buffer()
+{
+    this->m_rx_length = 0;
+    this->m_rx_skip = 0;
+}
+
+void Ethernet_WebSocket::fill_rx_buffer()
+{
+    while(this->m_global_client->available() > 0)
     {
-        p_data[counter++] = this->m_global_client->read();
+        if(this->m_rx_skip > 0)
+        {
+            this->m_global_client->read();
+            this->m_rx_skip--;
+            continue;
+        }
+
+        size_t space = sizeof(this->m_rx_buffer) - this->m_rx_length;
+
+        if(space == 0)
+            break;
+
+        int length = this->m_global_client->read(this->m_rx_buffer + this->m_rx_length, space);
+
+        if(length <= 0)
+            break;
+
+        this->m_rx_length += length;
+    }
+}
+
+size_t Ethernet_WebSocket::complete_frame_length()
+{
+    if(this->m_rx_length < 2)
+        return 0;
+
+    uint8_t length_byte = this->m_rx_buffer[1] & ~WS_MASK;
+    size_t header = 2;
+    uint64_t payload = length_byte;
+
+    if(length_byte == 126)
+    {
+        header = 4;
+
+        if(this->m_rx_length < header)
+            return 0;
+
+        payload = ((uint64_t)this->m_rx_buffer[2] << 8) | this->m_rx_buffer[3];
+    }
+    else if(length_byte == 127)
+    {
+        header = 10;
+
+        if(this->m_rx_length < header)
+            return 0;
+
+        payload = 0;
+
+        for(int i = 2; i < 10; i++)
+            payload = (payload << 8) | this->m_rx_buffer[i];
     }
 
-    return handle_websocket_data(p_data, counter);
+    if(this->m_rx_buffer[1] & WS_MASK)
+        header += 4;
+
+    uint64_t total = header + payload;
+
+    if(total > sizeof(this->m_rx_buffer))
+    {
+        // No cabe: se descarta lo que ya llegó y, conforme llegue, lo que falta.
+        logger.logln("Mensaje del websocket demasiado grande; se descarta.");
+
+        uint64_t remaining = total - this->m_rx_length;
+        this->m_rx_skip = remaining > SIZE_MAX ? SIZE_MAX : (size_t)remaining;
+        this->m_rx_length = 0;
+        return 0;
+    }
+
+    return this->m_rx_length >= total ? (size_t)total : 0;
 }
 
 int Ethernet_WebSocket::send_data_to_server(const uint8_t *p_data, size_t p_length)
@@ -32,6 +124,8 @@ bool Ethernet_WebSocket::start_websocket_client()
     logger.log("Enviando Hansdshake a ");
     logger.log(this->m_server);
     logger.logln("...");
+
+    reset_rx_buffer();
 
     if(connect_to_server())
         logger.logln("Conectado al servidor websocket");
@@ -146,6 +240,10 @@ int Ethernet_WebSocket::get_message(uint8_t *p_data, int *p_length, size_t p_buf
 {
     uint8_t data[MAX_MESSAGE_SIZE];
     int type = 0;
+
+    if(p_buffer_len > sizeof(data))
+        p_buffer_len = sizeof(data);
+
     *p_length = get_data_from_server(data, p_buffer_len);
     
     if(*p_length < 0)

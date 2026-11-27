@@ -283,6 +283,20 @@ class Ethernet_SocketIO : public Ethernet_WebSocket
         const char *auth_key_to_send() const;
 
         /**
+         * \brief               Espera el siguiente mensaje completo de texto o binario.
+         * \details             Contesta los pings de Engine.IO que lleguen mientras tanto y sigue
+         *                      esperando. Sirve para las respuestas del handshake, que pueden
+         *                      llegar partidas o ya estar en el buffer junto con otro mensaje.
+         * \param p_buffer      Buffer para el payload (termina en nulo si es texto).
+         * \param p_length      Recibe la longitud del payload.
+         * \param p_size        Tamaño del buffer.
+         * \param p_timeout_ms  Espera máxima.
+         * \returns             Tipo de mensaje, un error del websocket, o
+         *                      WEBSOCKET_ERROR_NO_STREAM si no llegó nada a tiempo.
+         */
+        int wait_message(char *p_buffer, int *p_length, size_t p_size, unsigned long p_timeout_ms);
+
+        /**
          * \brief                   Arma el mensaje para unirse a un namespace.
          * \param p_buffer          Buffer destino.
          * \param p_size            Tamaño del buffer.

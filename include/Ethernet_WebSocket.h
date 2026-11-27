@@ -127,6 +127,12 @@
  * \brief   Tamaño máximo del payload de un mensaje de cierre.
  */
 #define MAX_CLOSE_MESSAGE_SIZE 64
+/**
+ * \def     WS_RX_BUFFER_SIZE
+ * \brief   Bytes recibidos que se guardan mientras se separan los frames. Caben varios
+ *          mensajes de Socket.IO seguidos; un frame más grande se descarta completo.
+ */
+#define WS_RX_BUFFER_SIZE 1024
 
 /**
  * \enum    websocket_close_status_t
@@ -302,7 +308,31 @@ class Ethernet_WebSocket : public Global_Client
          */
         int handle_websocket_data(uint8_t *p_data, size_t p_length);
 
+        /**
+         * \brief   Descarta lo recibido de una conexión anterior. Se llama al abrir cada
+         *          conexión, antes de leer frames.
+         */
+        void reset_rx_buffer();
+
     private:
+        /**
+         * \brief   Pasa al buffer lo que haya en el socket y descarta lo que falte de un frame
+         *          demasiado grande.
+         */
+        void fill_rx_buffer();
+
+        /**
+         * \brief   Tamaño del primer frame del buffer si ya llegó completo.
+         * \details Si el frame no cabe en el buffer, se descarta completo: lo que ya llegó y,
+         *          conforme llegue, lo que falta.
+         * \returns Bytes del frame (encabezado y payload), o 0 si todavía no está completo.
+         */
+        size_t complete_frame_length();
+
+        uint8_t m_rx_buffer[WS_RX_BUFFER_SIZE];             ///< Bytes recibidos que todavía no se entregan.
+        size_t m_rx_length = 0;                             ///< Bytes válidos en m_rx_buffer.
+        size_t m_rx_skip = 0;                               ///< Bytes que faltan por descartar de un frame demasiado grande.
+
         /**
          * \brief           Construye y envía un frame WebSocket con el opcode indicado.
          * \param p_opcode  Opcode del frame (texto, binario, ping, pong, cierre).

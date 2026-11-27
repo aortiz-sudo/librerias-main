@@ -2,6 +2,9 @@
 
 bool Ethernet_SocketIO::start_websocket_client()
 {
+    // Lo que quedara guardado de la conexión anterior no es de esta.
+    reset_rx_buffer();
+
     if(!connect_to_server())
         return false;
 
@@ -24,13 +27,9 @@ bool Ethernet_SocketIO::start_websocket_client()
     const char *text = "probe";
     send_ping_message((uint8_t *)text, strlen(text));
 
-    unsigned long time = millis();
-    while(!this->m_global_client->available() && millis() - time < 5000)
-        vTaskDelay(1 / portTICK_PERIOD_MS);
-
     char response[128] = "";
     int length = 0;
-    int type = get_message((uint8_t *)response, &length, 128);
+    int type = wait_message(response, &length, sizeof(response), 5000);
 
     if(type != WEBSOCKET_TEXT_MESSAGE)
     {
@@ -77,23 +76,15 @@ bool Ethernet_SocketIO::connect_to_namespace(int p_namespace_index)
     logger.debugln(log_string);
     send_text_message(string);
     
-    bool client_available = false;
-    unsigned long time = millis();
-    while(!client_available && millis() - time < 5000)
-    {
-        client_available = this->m_global_client->available();
-        vTaskDelay(1 / portTICK_PERIOD_MS);(1);
-    }
+    char response[256] = "";
+    int length = 0;
+    int type = wait_message(response, &length, sizeof(response), 5000);
 
-    if(!client_available)
+    if(type == WEBSOCKET_ERROR_NO_STREAM)
     {
         logger.debugln("Sin respuesta al unirse al namespace.");
         return false;
     }
-
-    char response[256] = "";
-    int length = 0;
-    int type = get_message((uint8_t *)response, &length, 256);
 
     logger.debugln(response);
 
@@ -350,6 +341,33 @@ void Ethernet_SocketIO::set_identifer(const char *p_identifier, const char *p_va
 {
     this->m_identifier = (char *)p_identifier;
     this->m_identifier_value = (char *)p_value;
+}
+
+int Ethernet_SocketIO::wait_message(char *p_buffer, int *p_length, size_t p_size, unsigned long p_timeout_ms)
+{
+    unsigned long start = millis();
+
+    while(millis() - start < p_timeout_ms)
+    {
+        int type = get_message((uint8_t *)p_buffer, p_length, p_size);
+
+        // Ping de Engine.IO mientras se espera otra respuesta: se contesta y se sigue esperando.
+        if(type == WEBSOCKET_TEXT_MESSAGE && *p_length == 1 && p_buffer[0] == (char)PING_MESSAGE)
+        {
+            this->m_last_ping = millis();
+            send_pong_message();
+            continue;
+        }
+
+        if(type == WEBSOCKET_TEXT_MESSAGE || type == WEBSOCKET_BINARY_MESSAGE || type == WEBSOCKET_ERROR_NOT_CONNECTED ||
+           type == WEBSOCKET_CLOSE_FRAME_MESSAGE || type == WEBSOCKET_ERROR_MASKED_MESSAGE)
+            return type;
+
+        // Todavía no llega el mensaje completo, o fue un ping o pong del websocket ya atendido.
+        vTaskDelay(1 / portTICK_PERIOD_MS);
+    }
+
+    return WEBSOCKET_ERROR_NO_STREAM;
 }
 
 bool Ethernet_SocketIO::connect_namespaces()
